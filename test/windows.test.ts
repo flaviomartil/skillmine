@@ -88,3 +88,21 @@ describe('digest and score', () => {
     expect(windowScore(['correction'])).toBeGreaterThan(windowScore(['explanation', 'decision']))
   })
 })
+
+describe('dropAutomated', () => {
+  test('drops templated prompts repeated across many sessions', async () => {
+    const { dropAutomated } = await import('../src/windows.ts')
+    const mk = (session: string, text: string) => {
+      const t = turn('user', text, { session })
+      return { id: session, client: 'claude' as const, session, project: '/p', turns: [t, turn('assistant', 'ok', { session })], digest: '', signals: ['correction' as const], start: 1, end: 2 }
+    }
+    const windows = [
+      ...Array.from({ length: 5 }, (_, i) => mk(`auto${i}`, 'Translate this README excerpt to English. Keep markdown structure and technical terms, keep code identifiers unchanged, no commentary. Excerpt: ' + i)),
+      mk('human1', 'no, the lock is in redis'),
+      mk('human2', 'no, the lock is in redis'),
+    ]
+    const { kept, dropped } = dropAutomated(windows, 5)
+    expect(dropped).toBe(5)
+    expect(kept.map((w) => w.session)).toEqual(['human1', 'human2'])
+  })
+})

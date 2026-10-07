@@ -37,6 +37,30 @@ export function signalsOf(turns: Turn[]): Signal[] {
   return [...out]
 }
 
+export function userPrefix(w: Window, len = 120): string | undefined {
+  const first = w.turns.find((t) => t.role === 'user' && t.text)
+  return first ? first.text.replace(/\s+/g, ' ').slice(0, len).toLowerCase() : undefined
+}
+
+export function dropAutomated(windows: Window[], minSessions = 5): { kept: Window[]; dropped: number } {
+  const sessionsByPrefix = new Map<string, Set<string>>()
+  for (const w of windows) {
+    const p = userPrefix(w)
+    if (!p) continue
+    let set = sessionsByPrefix.get(p)
+    if (!set) sessionsByPrefix.set(p, (set = new Set()))
+    set.add(w.session)
+  }
+  const kept: Window[] = []
+  let dropped = 0
+  for (const w of windows) {
+    const p = userPrefix(w)
+    if (p && (sessionsByPrefix.get(p)?.size ?? 0) >= minSessions) dropped++
+    else kept.push(w)
+  }
+  return { kept, dropped }
+}
+
 export function isExecutionOnly(turns: Turn[]): boolean {
   return turns.every((t) => t.role === 'user' ? t.text.length < 40 : t.text.length < 80)
 }

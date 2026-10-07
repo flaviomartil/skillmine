@@ -96,6 +96,7 @@ export class ClaudeReader implements Reader {
         }
       }
       if (line.type === 'user') text = stripInjected(text)
+      if (/^\[Historical tool_(call|result)/.test(text)) text = ''
       if (!text && tools.length === 0) continue
       turns.push({
         ref: `claude:${ref.id}:${line.uuid ?? turns.length}`,

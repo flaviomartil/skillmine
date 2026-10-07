@@ -41,6 +41,7 @@ beforeAll(async () => {
     { type: 'user', uuid: 'u3', sessionId: 'sess1', timestamp: RECENT.toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't2' }] } },
     { type: 'assistant', uuid: 'a3', sessionId: 'sess1', timestamp: RECENT.toISOString(), isSidechain: true, message: { role: 'assistant', content: [{ type: 'text', text: 'sidechain text' }] } },
     { type: 'assistant', uuid: 'a4', sessionId: 'sess1', timestamp: RECENT.toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'The first run failed because the lock file was stale; removing it let the second run pass.' }] } },
+    { type: 'assistant', uuid: 'a5', sessionId: 'sess1', timestamp: RECENT.toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: '[Historical tool_call; kimi; 2026-02-13T14:12:59Z] {"tool":"WriteFile"}' }] } },
   ]
   await writeFile(join(cdir, 'sess1.jsonl'), jsonl(claudeRows))
   await writeFile(join(cdir, 'old.jsonl'), jsonl(claudeRows))

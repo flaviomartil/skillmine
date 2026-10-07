@@ -1,6 +1,6 @@
 import type { Client, Reader, SessionRef, Window, Signal } from './types.ts'
 import { CLIENTS } from './types.ts'
-import { sliceSession, windowScore } from './windows.ts'
+import { sliceSession, windowScore, dropAutomated } from './windows.ts'
 
 export type MineOptions = {
   days: number
@@ -8,6 +8,7 @@ export type MineOptions = {
   project?: string
   now?: number
   concurrency?: number
+  automatedMinSessions?: number
   onProgress?: (done: number, total: number) => void
 }
 
@@ -21,6 +22,7 @@ export type ClientStats = {
 export type MineResult = {
   since: number
   windows: Window[]
+  automated: number
   perClient: Record<Client, ClientStats>
   signals: Record<Signal, number>
   projects: Record<string, number>
@@ -48,7 +50,7 @@ export async function mine(readers: Record<Client, Reader>, opts: MineOptions): 
   const perClient = Object.fromEntries(CLIENTS.map((c) => [c, emptyStats()])) as Record<Client, ClientStats>
   const signals: Record<Signal, number> = { correction: 0, 'fail-then-pass': 0, explanation: 0, decision: 0 }
   const projects: Record<string, number> = {}
-  const windows: Window[] = []
+  const collected: Window[] = []
 
   const refs: SessionRef[] = []
   for (const client of opts.clients) {
@@ -69,13 +71,7 @@ export async function mine(readers: Record<Client, Reader>, opts: MineOptions): 
         if (opts.project && project && !project.startsWith(opts.project)) continue
         stats.sessions++
         stats.turns += turns.length
-        for (const w of sliceSession(turns)) {
-          stats.windows++
-          windows.push(w)
-          for (const s of w.signals) signals[s]++
-          const key = w.project || '(unknown)'
-          projects[key] = (projects[key] ?? 0) + 1
-        }
+        for (const w of sliceSession(turns)) collected.push(w)
       } catch {
         stats.errors++
       } finally {
@@ -85,6 +81,13 @@ export async function mine(readers: Record<Client, Reader>, opts: MineOptions): 
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, queue.length || 1) }, worker))
+  const { kept: windows, dropped: automated } = dropAutomated(collected, opts.automatedMinSessions)
+  for (const w of windows) {
+    perClient[w.client].windows++
+    for (const s of w.signals) signals[s]++
+    const key = w.project || '(unknown)'
+    projects[key] = (projects[key] ?? 0) + 1
+  }
   windows.sort((a, b) => windowScore(b.signals) - windowScore(a.signals) || b.end - a.end)
-  return { since, windows, perClient, signals, projects }
+  return { since, windows, automated, perClient, signals, projects }
 }

@@ -23,8 +23,22 @@ bun run src/cli.ts mine --days 7 --dry --clients claude,agy --project ~/projects
 bun test
 ```
 
-`--dry` reads sessions, slices them into windows and applies the free prefilter. No model
-is called. The planner and apply steps arrive in phase 3.
+`--dry` reads sessions, slices them into windows, drops automated prompts, embeds the
+windows with a local model (Ollama, `nomic-embed-text` by default) and collapses
+near-duplicates into clusters. Only cluster representatives reach the classifier, so a
+3-day run on a busy machine costs a few dozen Jev calls instead of thousands.
+
+```sh
+ollama pull nomic-embed-text                                   # once, ~270 MB, runs on CPU
+bun run src/cli.ts mine --days 3 --dry --classify jev --max-calls 40 --out clusters.jsonl
+bun run src/cli.ts mine --days 3 --dry --classify laya         # same API served locally by laya-server
+bun run src/cli.ts mine --days 3 --dry --embed none            # skip embeddings, every window is a cluster
+echo 'user: no, the lock is in redis' | bun run src/cli.ts classify --digest - --skill redis-locks="Locking with Redis."
+```
+
+Classifier backends: `jev` (TypeSafe, `TYPESAFE_API_KEY`), `laya` (laya-server at
+`SKILLMINE_LAYA_URL`, default `http://localhost:8000`), `haiku` (`claude -p`, costs more
+per call). The planner and apply steps arrive in phase 3.
 
 ## Why
 
