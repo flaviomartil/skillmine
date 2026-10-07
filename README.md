@@ -11,7 +11,20 @@ or agent definition on disk with full provenance and one-command undo.
 skillmine undo --last
 ```
 
-Status: design phase. See [SPEC.md](SPEC.md).
+Status: phase 1 (readers and dry run). See [SPEC.md](SPEC.md) for the full design.
+
+## Try it
+
+```sh
+bun install
+bun run src/cli.ts doctor                     # which session stores exist on this machine
+bun run src/cli.ts mine --days 30 --dry       # sessions, turns, windows and signals per client
+bun run src/cli.ts mine --days 7 --dry --clients claude,agy --project ~/projects/foo --json
+bun test
+```
+
+`--dry` reads sessions, slices them into windows and applies the free prefilter. No model
+is called. The planner and apply steps arrive in phase 3.
 
 ## Why
 
