@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util'
 import { stat, readFile, writeFile } from 'node:fs/promises'
 import { createReaders, defaultPaths } from './readers/index.ts'
 import { mine, parseClients } from './mine.ts'
-import { dryReport, analysisReport, runReport, ledgerReport } from './report.ts'
+import { dryReport, analysisReport, runReport, ledgerReport, curateReport } from './report.ts'
 import { analyze } from './analyze.ts'
 import { createEmbedder, parseEmbedBackend, OllamaEmbedder } from './embed/index.ts'
 import { createClassifier, parseClassifierBackend, passes } from './classify/index.ts'
@@ -14,6 +14,10 @@ import { applyEdits } from './apply/writer.ts'
 import { undo } from './apply/undo.ts'
 import { runPlans, type RunResult } from './run.ts'
 import { prepare } from './prepare.ts'
+import { curate } from './curate/index.ts'
+import { recordUse, setPinned } from './curate/usage.ts'
+import { discoverSkills } from './catalog.ts'
+import { installThinSkill } from './install.ts'
 
 const HELP = `skillmine — mine coding-agent sessions into skills
 
@@ -28,6 +32,10 @@ usage:
   skillmine undo [--last | --id <edit-id> | --run <run-id>]
   skillmine ledger [--limit 30] [--run <run-id>]
   skillmine classify --digest <file|-> [--classify jev|laya|haiku] [--skill name=description ...]
+  skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients all|...] [--project <path>] [--json]
+  skillmine pin <skill> | skillmine unpin <skill>
+  skillmine touch <skill>                   # record one use (the mod calls this)
+  skillmine install-skill [--from <dir>]    # link the thin /skillmine skill into Codex, Kimi, OpenCode and Antigravity
   skillmine doctor
 
 Without --dry, passed clusters go to the planner and its edits are applied with a ledger,
@@ -54,6 +62,16 @@ async function main(argv: string[]): Promise<number> {
       return undoCmd(rest)
     case 'ledger':
       return ledgerCmd(rest)
+    case 'curate':
+      return curateCmd(rest)
+    case 'pin':
+      return pinCmd(rest, true)
+    case 'unpin':
+      return pinCmd(rest, false)
+    case 'touch':
+      return touchCmd(rest)
+    case 'install-skill':
+      return installSkillCmd(rest)
   }
   console.error(`unknown command: ${cmd}\n\n${HELP}`)
   return 2
@@ -283,6 +301,81 @@ async function ledgerCmd(argv: string[]): Promise<number> {
   const filtered = (values.run ? all.filter((e) => e.run === values.run) : all).slice(-(Number(values.limit) || 30))
   console.log(values.json ? JSON.stringify(filtered, null, 2) : ledgerReport(filtered))
   return 0
+}
+
+async function curateCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      dry: { type: 'boolean', default: false },
+      'stale-days': { type: 'string', default: '14' },
+      'archive-days': { type: 'string', default: '30' },
+      clients: { type: 'string', default: 'all' },
+      project: { type: 'string' },
+      json: { type: 'boolean', default: false },
+      quiet: { type: 'boolean', default: false },
+    },
+    strict: true,
+  })
+  const report = progress(values.quiet || values.json)
+  const all = createReaders()
+  const readers = Object.fromEntries(parseClients(values.clients).map((c) => [c, all[c]]))
+  const res = await curate({
+    store: new Store(),
+    readers,
+    project: values.project,
+    staleDays: Number(values['stale-days']) || 14,
+    archiveDays: Number(values['archive-days']) || 30,
+    dry: values.dry,
+    onPhase: report,
+  })
+  if (values.json) {
+    console.log(JSON.stringify({ run: res.run, scanned: res.scanned, rows: res.rows.map((r) => ({ name: r.skill.name, path: r.skill.realpath, verdict: r.verdict, idleDays: r.idleDays, usage: r.usage })), archived: res.archived.map((a) => a.id), rejected: res.rejected.map((a) => a.error) }, null, 2))
+  } else console.log(curateReport(res, values.dry))
+  return 0
+}
+
+async function skillByName(name: string, project?: string) {
+  const skills = await discoverSkills({ project })
+  return skills.find((s) => s.name === name)
+}
+
+async function pinCmd(argv: string[], pinned: boolean): Promise<number> {
+  const name = argv[0]
+  if (!name) {
+    console.error('usage: skillmine pin|unpin <skill>')
+    return 2
+  }
+  const skill = await skillByName(name, process.cwd())
+  if (!skill) {
+    console.error(`skill "${name}" not found`)
+    return 1
+  }
+  const u = await setPinned(skill, pinned)
+  console.log(`${pinned ? 'pinned' : 'unpinned'} ${name} (${u.use_count} uses)`)
+  return 0
+}
+
+async function touchCmd(argv: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({ args: argv, options: { project: { type: 'string', default: process.cwd() } }, strict: true, allowPositionals: true })
+  const name = positionals[0]
+  if (!name) {
+    console.error('usage: skillmine touch <skill>')
+    return 2
+  }
+  const skill = await skillByName(name, values.project)
+  if (!skill || skill.createdBy !== 'skillmine') return 0
+  await recordUse(skill)
+  return 0
+}
+
+async function installSkillCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { from: { type: 'string' } }, strict: true })
+  const res = await installThinSkill({ from: values.from })
+  for (const l of res.linked) console.log(`linked    ${l}`)
+  for (const s of res.skipped) console.log(`skipped   ${s.dir}  ${s.reason}`)
+  if (!res.linked.length && !res.skipped.length) console.log('no client skill directories found')
+  return res.linked.length || res.skipped.length ? 0 : 1
 }
 
 async function readInput(spec: string): Promise<string> {

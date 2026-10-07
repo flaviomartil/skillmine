@@ -189,8 +189,8 @@ export const register: Register = (on, options) => {
     sessionId = await $.session.id()
     await $.command.register({
       name: 'skillmine',
-      description: 'Mine sessions into skills. /skillmine 30 mines the last 30 days, /skillmine undo reverts the last edit, /skillmine lists what was learned.',
-      argumentHint: '[days | undo | status]',
+      description: 'Mine sessions into skills. /skillmine 30 mines the last 30 days, /skillmine undo reverts the last edit, /skillmine curate lists stale skills, /skillmine lists what was learned.',
+      argumentHint: '[days | undo | status | curate]',
     })
     const stored = await $.store.get('lessons')
     if (Array.isArray(stored)) await update($, lessons, () => (stored as Lesson[]).slice(-MAX_LESSONS))
@@ -210,8 +210,21 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  on('skill.prompt', async ($, e, next) => {
+    if (e.skill !== 'skillmine') {
+      $.clock.after(0, () => {
+        void runCli($, ['touch', e.skill, '--project', cwd], undefined, 30_000).catch(() => undefined)
+      })
+    }
+    return next(e)
+  })
+
   on('command.run', { command: 'skillmine' }, async ($, e) => {
     const arg = e.args.trim()
+    if (arg === 'curate') {
+      const res = await runCli($, ['curate', '--dry', '--project', cwd, '--quiet'], undefined, 600_000)
+      return { text: (res.stdout + res.stderr).trim() || `curate exited ${res.exitCode}` }
+    }
     if (arg === 'undo') {
       const res = await runCli($, ['undo', '--last'])
       return { text: (res.stdout + res.stderr).trim() || `undo exited ${res.exitCode}` }
@@ -223,7 +236,7 @@ export const register: Register = (on, options) => {
       return { text: `🧠 ${all.length} lessons so far, newest last:\n${lines.join('\n')}` }
     }
     const days = Number(arg)
-    if (!Number.isFinite(days) || days <= 0) return { text: 'usage: /skillmine [days | undo | status]' }
+    if (!Number.isFinite(days) || days <= 0) return { text: 'usage: /skillmine [days | undo | status | curate]' }
     if ((await read($, busy)) !== null) return { text: '🧠 Skillmine is already working; try again when the status line clears.' }
     $.clock.after(0, () => {
       void mineDays($, days)

@@ -86,6 +86,32 @@ Skills land in `<project>/.agents/skills/<name>/SKILL.md` (local) or `~/.agents/
 client's skills dir that exists, and frontmatter carrying `created_by: skillmine` plus the
 session refs it came from.
 
+## Other agents: Codex, Kimi, OpenCode, Antigravity
+
+They have no mod API, so they get a thin skill that shells out to the same CLI:
+
+```sh
+skillmine install-skill        # symlinks clients/skillmine into each client's skills dir that exists
+```
+
+Then `/skillmine 30` in any of them mines the last 30 days and reports one line per lesson.
+Their sessions are read by every run anyway, so a `/skillmine 1` from Claude also learns
+from yesterday's Codex work.
+
+## Curate
+
+Skills nobody uses decay. Usage is recorded per mined skill in `.usage.json`: the Claude
+mod records every skill invocation, batch runs scan the other clients' transcripts.
+
+```sh
+skillmine curate --dry         # active / fresh / stale (14d) / archive (30d) per mined skill
+skillmine curate               # moves archive candidates to .archive/ through the ledger; undo with --run
+skillmine pin <skill>          # exempt one skill from decay
+```
+
+Human-authored skills are never touched. Patches Skillmine makes to its own skills do not
+count as use. `/skillmine curate` in Claude Code prints the dry report.
+
 ## Why
 
 Most of what an agent session teaches is lost when the session ends. Tools that save

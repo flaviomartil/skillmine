@@ -5,6 +5,13 @@ import { parseFrontmatter, discoverSkills, type Skill } from '../catalog.ts'
 import { Store, sha256, type LedgerEntry } from './store.ts'
 import { validateEdit } from './validate.ts'
 import { defaultLayout, rootFor, fanoutFor, type Layout } from './paths.ts'
+import { readUsage, writeUsage } from '../curate/usage.ts'
+
+async function bumpPatchCount(skill: Skill, at: number): Promise<void> {
+  const u = await readUsage(skill, at)
+  u.patch_count += 1
+  await writeUsage(skill, u)
+}
 
 export type ApplyContext = {
   store: Store
@@ -55,6 +62,7 @@ export async function applyEdits(edits: Edit[], ctx: ApplyContext): Promise<Appl
       if (v.downgraded) entry.reason = `${entry.reason} [${v.downgraded}]`
       await ctx.store.append(entry)
       applied.push(entry)
+      if ((edit.action === 'update' || edit.action === 'add_reference') && existing?.createdBy === 'skillmine') await bumpPatchCount(existing, now()).catch(() => undefined)
       if (edit.action === 'create') {
         const created = await readSkill(entry.path, (edit as CreateEdit).scope)
         if (created) catalog.set(created.name, created)

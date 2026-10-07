@@ -248,9 +248,21 @@ skillmine apply --edits <file|->          # used by the mod
 skillmine classify --window <file|->      # one window, prints Verdict
 skillmine undo --last | <id> | --run <id>
 skillmine ledger [--run <id>] [--limit 50]
-skillmine curate [--dry]
+skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients ...]   # usage scan + stale/archive
+skillmine pin <skill> | unpin <skill>     # exempt a mined skill from decay
+skillmine touch <skill>                   # record one use; the mod calls it on skill.prompt
+skillmine install-skill [--from <dir>]    # link clients/skillmine into Codex, Kimi, OpenCode, Antigravity skill dirs
 skillmine doctor                          # readers found, classifier reachable, targets writable
 ```
+
+Usage lives in `.usage.json` beside each mined `SKILL.md`: `use_count`, `last_used_at`,
+`patch_count`, `pinned`, `first_seen_at`, `status`, `scanned_until`. The mod records a
+use on every `skill.prompt` event through `skillmine touch`; `curate` scans the other
+clients' transcripts for `Skill`-style tool calls, reads of `skills/<name>/SKILL.md` and
+`/<name>` prompts, and only counts stamps newer than the previous scan. Patches by
+Skillmine raise `patch_count`, never `use_count`. Idleness is measured from the latest of
+`last_used_at`, the ledger `create` time and `first_seen_at`; an archive is an ordinary
+`archive` edit through `applyEdits`, so it is validated, snapshotted, logged and undoable.
 
 `mine --dry` prints sessions scanned, windows kept per signal, clusters with sample
 digests and the catalog matches. No planner call. Always the first run on a new machine.

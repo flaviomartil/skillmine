@@ -104,3 +104,18 @@ export function ledgerReport(entries: import('./apply/store.ts').LedgerEntry[]):
     .map((e) => `${new Date(e.ts).toISOString().slice(0, 16)}  ${e.status.padEnd(11)} ${e.action.padEnd(13)} ${e.name.padEnd(32)} ${e.id}  ${e.error ?? e.path}`)
     .join('\n')
 }
+
+export function curateReport(res: import('./curate/index.ts').CurateResult, dry: boolean): string {
+  const mined = res.rows.filter((r) => r.skill.createdBy === 'skillmine')
+  const by = (v: import('./curate/index.ts').Verdict) => mined.filter((r) => r.verdict === v)
+  const lines = [
+    `curate${dry ? ' (dry)' : ''}: ${res.rows.length} skills in catalog, ${mined.length} created by skillmine`,
+    `scanned ${res.scanned.sessions} sessions / ${res.scanned.turns} turns, ${res.scanned.uses} new uses recorded`,
+    `active ${by('active').length} · fresh ${by('fresh').length} · stale ${by('stale').length} · archive ${by('archive').length} · pinned ${by('pinned').length}`,
+  ]
+  const show = mined.filter((r) => r.verdict === 'stale' || r.verdict === 'archive').sort((a, b) => b.idleDays - a.idleDays)
+  for (const r of show) lines.push(`  ${r.verdict.padEnd(8)} ${r.skill.name.padEnd(36)} idle ${String(r.idleDays).padStart(3)}d  uses ${r.usage.use_count}  ${r.skill.realpath}`)
+  if (res.archived.length) lines.push(`archived ${res.archived.length} (run ${res.run}; undo with: skillmine undo --run ${res.run})`)
+  else if (!dry && by('archive').length) lines.push(`archive candidates were rejected: ${res.rejected.map((r) => r.error).join('; ')}`)
+  return lines.join('\n')
+}
