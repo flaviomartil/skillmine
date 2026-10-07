@@ -10,8 +10,7 @@ export function thinSkillTargets(home = homedir()): string[] {
     join(home, '.kimi', 'skills'),
     join(home, '.kimi-code', 'skills'),
     join(home, '.config', 'opencode', 'skills'),
-    join(home, '.gemini', 'skills'),
-    join(home, '.gemini', 'antigravity', 'skills'),
+    join(home, '.gemini', 'config', 'skills'),
   ]
 }
 

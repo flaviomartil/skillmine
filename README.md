@@ -94,9 +94,30 @@ They have no mod API, so they get a thin skill that shells out to the same CLI:
 skillmine install-skill        # symlinks clients/skillmine into each client's skills dir that exists
 ```
 
+If a skill catalog already fans out to your clients (one canonical `~/.agents/skills`
+that every client links), copy or link `clients/skillmine` there instead and let it
+propagate. `skillmine install-skill --remove` drops the per-client symlinks.
+
 Then `/skillmine 30` in any of them mines the last 30 days and reports one line per lesson.
 Their sessions are read by every run anyway, so a `/skillmine 1` from Claude also learns
 from yesterday's Codex work.
+
+## Live gate for other agents
+
+Codex, Kimi, OpenCode and Antigravity cannot run a mod, so their live loop is a
+subprocess:
+
+```sh
+skillmine gate --client codex --session <thread-id> --project "$PWD"
+```
+
+Each call counts one stop for that session. Every third stop it reads the turns added
+since the last gate, classifies them, and on a pass plans and applies, with the same
+ledger, snapshots and undo as everything else. A 20 minute cooldown follows a plan;
+turns held back by the cooldown are gated next time. State lives in
+`~/.skillmine/gate/`, a log in `~/.skillmine/gate.log`. A Stop hook that spawns it
+detached (`setsid -f skillmine gate ...`) returns immediately, which is how the AI Harness
+dispatcher wires it for those clients.
 
 ## Curate
 

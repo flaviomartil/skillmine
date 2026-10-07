@@ -14,7 +14,7 @@ export function defaultLayout(home = homedir()): Layout {
   return {
     home,
     globalRoot: process.env.SKILLMINE_GLOBAL_SKILLS ?? join(home, '.agents', 'skills'),
-    globalFanout: [join(home, '.claude', 'skills'), join(home, '.codex', 'skills'), join(home, '.kimi', 'skills'), join(home, '.gemini', 'skills'), join(home, '.config', 'opencode', 'skills')],
+    globalFanout: [join(home, '.claude', 'skills'), join(home, '.codex', 'skills'), join(home, '.kimi', 'skills'), join(home, '.kimi-code', 'skills'), join(home, '.gemini', 'config', 'skills'), join(home, '.config', 'opencode', 'skills')],
     localRoot: (project) => join(project, '.agents', 'skills'),
     localFanout: (project) => [join(project, '.claude', 'skills')],
   }

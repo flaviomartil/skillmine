@@ -252,8 +252,25 @@ skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients ...]  
 skillmine pin <skill> | unpin <skill>     # exempt a mined skill from decay
 skillmine touch <skill>                   # record one use; the mod calls it on skill.prompt
 skillmine install-skill [--from <dir>]    # link clients/skillmine into Codex, Kimi, OpenCode, Antigravity skill dirs
+skillmine gate --client <c> --session <id> [--project <p>] [--every 3] [--cooldown 20] [--force]
+                                          # live gate for clients without a mod API, spawned detached by a Stop hook
 skillmine doctor                          # readers found, classifier reachable, targets writable
 ```
+
+`gate` keeps per-session state (`stops`, `gatedTurns`, `lastPlanned`) under
+`~/.skillmine/gate/` and a lock per session. Only every Nth stop reaches the classifier;
+rejected turns are consumed, turns blocked by the cooldown are kept for the next gate.
+It is the same pipeline as the mod's live check, run as a subprocess.
+
+### Adapter layout (per client)
+
+| Client | Live loop | `/skillmine N` |
+|---|---|---|
+| Claude Code | mod, in process (`hooks/register.tsx`) | mod command |
+| OpenCode | OpenCode plugin calls the shared dispatcher on `stop`, which spawns `skillmine gate` | thin skill |
+| Codex, Kimi, Antigravity | Stop hook (`ai-harness-hook`) spawns `skillmine gate` detached | thin skill |
+
+The CLI is the only engine. Adapters never contain pipeline logic.
 
 Usage lives in `.usage.json` beside each mined `SKILL.md`: `use_count`, `last_used_at`,
 `patch_count`, `pinned`, `first_seen_at`, `status`, `scanned_until`. The mod records a

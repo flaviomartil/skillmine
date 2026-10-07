@@ -24,7 +24,8 @@ export function globalSkillDirs(home = homedir()): string[] {
     join(home, '.claude', 'skills'),
     join(home, '.codex', 'skills'),
     join(home, '.kimi', 'skills'),
-    join(home, '.gemini', 'skills'),
+    join(home, '.kimi-code', 'skills'),
+    join(home, '.gemini', 'config', 'skills'),
     join(home, '.config', 'opencode', 'skills'),
   ]
 }

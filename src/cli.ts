@@ -15,9 +15,11 @@ import { undo } from './apply/undo.ts'
 import { runPlans, type RunResult } from './run.ts'
 import { prepare } from './prepare.ts'
 import { curate } from './curate/index.ts'
+import { gate, logGate } from './gate.ts'
+import type { Client } from './types.ts'
 import { recordUse, setPinned } from './curate/usage.ts'
 import { discoverSkills } from './catalog.ts'
-import { installThinSkill } from './install.ts'
+import { installThinSkill, uninstallThinSkill } from './install.ts'
 
 const HELP = `skillmine — mine coding-agent sessions into skills
 
@@ -35,7 +37,7 @@ usage:
   skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients all|...] [--project <path>] [--json]
   skillmine pin <skill> | skillmine unpin <skill>
   skillmine touch <skill>                   # record one use (the mod calls this)
-  skillmine install-skill [--from <dir>]    # link the thin /skillmine skill into Codex, Kimi, OpenCode and Antigravity
+  skillmine install-skill [--from <dir>] [--remove]   # link the thin /skillmine skill into Codex, Kimi, OpenCode and Antigravity
   skillmine doctor
 
 Without --dry, passed clusters go to the planner and its edits are applied with a ledger,
@@ -72,6 +74,8 @@ async function main(argv: string[]): Promise<number> {
       return touchCmd(rest)
     case 'install-skill':
       return installSkillCmd(rest)
+    case 'gate':
+      return gateCmd(rest)
   }
   console.error(`unknown command: ${cmd}\n\n${HELP}`)
   return 2
@@ -335,6 +339,64 @@ async function curateCmd(argv: string[]): Promise<number> {
   return 0
 }
 
+async function gateCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      client: { type: 'string' },
+      session: { type: 'string' },
+      project: { type: 'string', default: process.env.AI_HARNESS_PROJECT_DIR ?? process.cwd() },
+      every: { type: 'string', default: process.env.SKILLMINE_GATE_EVERY ?? '3' },
+      cooldown: { type: 'string', default: process.env.SKILLMINE_GATE_COOLDOWN_MIN ?? '20' },
+      classify: { type: 'string', default: process.env.SKILLMINE_CLASSIFIER ?? 'jev' },
+      planner: { type: 'string', default: process.env.SKILLMINE_PLANNER ?? 'claude' },
+      'planner-model': { type: 'string' },
+      embed: { type: 'string', default: process.env.SKILLMINE_EMBED ?? 'ollama' },
+      force: { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
+    },
+    strict: true,
+  })
+  const client = (values.client === 'agy' ? 'antigravity' : values.client) as Client | undefined
+  if (!client || !values.session) {
+    console.error('--client and --session are required')
+    return 2
+  }
+  const store = new Store()
+  const readers = createReaders()
+  if (!(client in readers)) {
+    console.error(`unknown client: ${values.client}`)
+    return 2
+  }
+  let embed
+  try {
+    embed = await createEmbedder(parseEmbedBackend(values.embed))
+  } catch {
+    embed = undefined
+  }
+  const res = await gate({
+    client,
+    session: values.session,
+    project: values.project,
+    readers,
+    store,
+    every: Number(values.every) || 3,
+    cooldownMs: (Number(values.cooldown) || 20) * 60_000,
+    force: values.force,
+    classifier: createClassifier(parseClassifierBackend(values.classify, 'jev')),
+    embedder: embed?.embedder,
+    planner: createPlanner(parsePlannerBackend(values.planner), values['planner-model']),
+  })
+  embed?.cache.close()
+  await logGate(store, client, values.session, res)
+  if (values.json) console.log(JSON.stringify({ ...res, applied: res.applied.map((a) => ({ id: a.id, action: a.action, name: a.name, path: a.path })), rejected: res.rejected.map((r) => r.error) }, null, 2))
+  else {
+    console.log(`gate ${client}:${values.session} -> ${res.status}${res.reason ? ` (${res.reason})` : ''}`)
+    for (const a of res.applied) console.log(`  ${a.action.padEnd(13)} ${a.name}  ${a.path}`)
+  }
+  return 0
+}
+
 async function skillByName(name: string, project?: string) {
   const skills = await discoverSkills({ project })
   return skills.find((s) => s.name === name)
@@ -370,7 +432,13 @@ async function touchCmd(argv: string[]): Promise<number> {
 }
 
 async function installSkillCmd(argv: string[]): Promise<number> {
-  const { values } = parseArgs({ args: argv, options: { from: { type: 'string' } }, strict: true })
+  const { values } = parseArgs({ args: argv, options: { from: { type: 'string' }, remove: { type: 'boolean', default: false } }, strict: true })
+  if (values.remove) {
+    const removed = await uninstallThinSkill()
+    for (const r of removed) console.log(`removed   ${r}`)
+    if (!removed.length) console.log('nothing to remove')
+    return 0
+  }
   const res = await installThinSkill({ from: values.from })
   for (const l of res.linked) console.log(`linked    ${l}`)
   for (const s of res.skipped) console.log(`skipped   ${s.dir}  ${s.reason}`)
