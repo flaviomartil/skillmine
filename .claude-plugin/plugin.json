@@ -1,0 +1,52 @@
+{
+  "name": "skillmine",
+  "displayName": "Skillmine",
+  "version": "0.1.0",
+  "description": "Mines your sessions into skills: a cheap classifier spots reusable knowledge every few turns, the model plans typed edits, and each lesson lands in your skill library with provenance and undo.",
+  "author": {
+    "name": "Flavio Martil",
+    "url": "https://github.com/flaviomartil"
+  },
+  "homepage": "https://github.com/flaviomartil/skillmine#readme",
+  "repository": "https://github.com/flaviomartil/skillmine",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "learning",
+    "self-improvement",
+    "sessions",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cli": {
+      "type": "string",
+      "default": "skillmine",
+      "description": "Command that runs the skillmine CLI (for a checkout: bun run /path/to/skillmine/src/cli.ts)",
+      "title": "Skillmine CLI command"
+    },
+    "classifier": {
+      "type": "string",
+      "default": "jev",
+      "options": [
+        "jev",
+        "laya",
+        "haiku"
+      ],
+      "description": "Classifier backend used for the live gate",
+      "title": "Classifier"
+    },
+    "every": {
+      "type": "number",
+      "default": 3,
+      "description": "Check the chat every N completed turns",
+      "title": "Check every N turns"
+    },
+    "cooldownMinutes": {
+      "type": "number",
+      "default": 20,
+      "description": "Minimum minutes between two live checks that reached the planner",
+      "title": "Cooldown (minutes)"
+    }
+  }
+}

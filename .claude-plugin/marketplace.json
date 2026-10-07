@@ -1,0 +1,16 @@
+{
+  "name": "skillmine",
+  "owner": {
+    "name": "Flavio Martil",
+    "url": "https://github.com/flaviomartil"
+  },
+  "plugins": [
+    {
+      "name": "skillmine",
+      "description": "Mine your coding-agent sessions into skills, runbooks and agents. The LLM decides, you undo.",
+      "source": "./",
+      "version": "0.1.0"
+    }
+  ],
+  "description": "Skillmine: mine coding-agent sessions into skills."
+}

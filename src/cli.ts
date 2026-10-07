@@ -13,6 +13,7 @@ import { Store } from './apply/store.ts'
 import { applyEdits } from './apply/writer.ts'
 import { undo } from './apply/undo.ts'
 import { runPlans, type RunResult } from './run.ts'
+import { prepare } from './prepare.ts'
 
 const HELP = `skillmine — mine coding-agent sessions into skills
 
@@ -22,7 +23,8 @@ usage:
                  [--classify jev|laya|haiku] [--max-calls 50]
                  [--planner claude|codex|agy|kimi|opencode] [--planner-model <name>] [--allow-human-edits]
                  [--dry] [--out clusters.jsonl] [--json] [--samples 5] [--quiet]
-  skillmine apply --edits <file|-> [--project <path>] [--allow-human-edits]
+  skillmine prepare --digest <file|-> [--project <path>] [--classify jev|laya|haiku] [--embed ollama|none] [--source ref ...]
+  skillmine apply --edits <file|-> [--project <path>] [--expect name=sha ...] [--allow-human-edits]
   skillmine undo [--last | --id <edit-id> | --run <run-id>]
   skillmine ledger [--limit 30] [--run <run-id>]
   skillmine classify --digest <file|-> [--classify jev|laya|haiku] [--skill name=description ...]
@@ -44,6 +46,8 @@ async function main(argv: string[]): Promise<number> {
       return mineCmd(rest)
     case 'classify':
       return classifyCmd(rest)
+    case 'prepare':
+      return prepareCmd(rest)
     case 'apply':
       return applyCmd(rest)
     case 'undo':
@@ -184,12 +188,47 @@ async function classifyCmd(argv: string[]): Promise<number> {
   return 0
 }
 
+async function prepareCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      digest: { type: 'string' },
+      project: { type: 'string', default: process.cwd() },
+      classify: { type: 'string', default: 'jev' },
+      embed: { type: 'string', default: 'ollama' },
+      source: { type: 'string', multiple: true, default: [] },
+    },
+    strict: true,
+  })
+  if (!values.digest) {
+    console.error('--digest <file|-> is required')
+    return 2
+  }
+  const digest = (await readInput(values.digest)).trim()
+  if (!digest) {
+    console.error('empty digest')
+    return 2
+  }
+  let embed
+  try {
+    embed = await createEmbedder(parseEmbedBackend(values.embed))
+  } catch {
+    embed = undefined
+  }
+  const classifier = createClassifier(parseClassifierBackend(values.classify, 'jev'))
+  const out = await prepare(digest, { project: values.project ?? '', sources: values.source as string[], classifier, embedder: embed?.embedder, store: new Store() })
+  embed?.cache.close()
+  console.log(JSON.stringify(out))
+  return 0
+}
+
 async function applyCmd(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
       edits: { type: 'string' },
       project: { type: 'string', default: process.cwd() },
+      expect: { type: 'string', multiple: true, default: [] },
       'allow-human-edits': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
     },
@@ -206,7 +245,12 @@ async function applyCmd(argv: string[]): Promise<number> {
     return 0
   }
   const store = new Store()
-  const res = await applyEdits(edits, { store, project: values.project ?? '', allowHumanEdits: values['allow-human-edits'] })
+  const expectedSha = new Map<string, string>()
+  for (const pair of values.expect as string[]) {
+    const i = pair.indexOf('=')
+    if (i > 0) expectedSha.set(pair.slice(0, i), pair.slice(i + 1))
+  }
+  const res = await applyEdits(edits, { store, project: values.project ?? '', expectedSha, allowHumanEdits: values['allow-human-edits'] })
   if (values.json) console.log(JSON.stringify(res, null, 2))
   else {
     for (const a of res.applied) console.log(`applied   ${a.action.padEnd(13)} ${a.name}  ${a.path}  (${a.id})`)

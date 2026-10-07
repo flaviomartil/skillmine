@@ -7,8 +7,19 @@
     "noUncheckedIndexedAccess": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "types": ["bun-types"],
+    "types": [
+      "bun-types"
+    ],
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ],
+  "exclude": [
+    "hooks",
+    "types",
+    "dist",
+    "node_modules"
+  ]
 }

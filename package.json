@@ -7,7 +7,7 @@
   "bin": { "skillmine": "./src/cli.ts" },
   "scripts": {
     "dev": "bun run src/cli.ts",
-    "test": "bun test",
+    "test": "bun test test/",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/cli.ts --compile --outfile dist/skillmine"
   },

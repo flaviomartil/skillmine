@@ -11,7 +11,30 @@ or agent definition on disk with full provenance and one-command undo.
 skillmine undo --last
 ```
 
-Status: phase 3 (readers, classifier, planner, apply, ledger, undo). See [SPEC.md](SPEC.md) for the full design.
+Status: phase 4 (CLI plus the Claude Code mod). See [SPEC.md](SPEC.md) for the full design.
+
+## Install the Claude Code mod
+
+```
+/plugin marketplace add flaviomartil/skillmine
+/plugin install skillmine@skillmine
+```
+
+The mod needs the `skillmine` CLI on your PATH (`bun run build` then link `dist/skillmine`),
+or set the mod's `cli` option to `bun run /path/to/skillmine/src/cli.ts`. For a checkout,
+`claude --plugin-dir /path/to/skillmine` loads it for one session.
+
+What it does once loaded:
+
+- Every 3 completed turns it digests the fresh part of the chat and asks the classifier
+  (Jev by default) whether something reusable was taught. On a yes it plans with the
+  session model from the prompt cache and applies the edits through the CLI.
+- Each lesson lands as one collapsed line in the transcript: `🧠 Skillmine learned a new
+  skill: pnpm-workspace-gotchas — …  [ show ]`. Press show to read what was written and
+  why, with an undo button. The status line shows how many lessons landed today.
+- `/skillmine 30` mines the last 30 days of Claude, Codex, Kimi, OpenCode and Antigravity
+  sessions in the background and posts one collapsed line per lesson as they land.
+- `/skillmine undo` reverts the last edit, `/skillmine` lists what was learned.
 
 ## Try it
 

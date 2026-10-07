@@ -1,11 +1,11 @@
-import { readFile } from 'node:fs/promises'
 import type { Analysis } from './analyze.ts'
 import type { Cluster } from './cluster.ts'
 import { clusterDigest } from './cluster.ts'
 import { passes, type Verdict } from './classify/types.ts'
 import type { Planner, PlanInput, PlanOutput, Edit, Scope } from './plan/types.ts'
 import { discoverSkills, type Skill } from './catalog.ts'
-import { Store, sha256, type LedgerEntry } from './apply/store.ts'
+import { Store, type LedgerEntry } from './apply/store.ts'
+import { planInputFor } from './prepare.ts'
 import { applyEdits } from './apply/writer.ts'
 import type { Layout } from './apply/paths.ts'
 
@@ -55,27 +55,7 @@ export function sourcesFor(c: Cluster, max = 8): string[] {
 }
 
 export async function buildPlanInput(c: Cluster, verdict: Verdict | undefined, skills: Map<string, Skill>, recent: string[], expectedSha: Map<string, string>): Promise<PlanInput> {
-  const targetName = verdict?.target ?? c.matches[0]?.name
-  let target: PlanInput['target']
-  if (targetName) {
-    const s = skills.get(targetName)
-    if (s) {
-      const text = await readFile(s.realpath, 'utf8')
-      const sha = sha256(text)
-      expectedSha.set(s.name, sha)
-      target = { name: s.name, description: s.description, body: s.body, sha, createdBy: s.createdBy, scope: s.scope }
-    }
-  }
-  return {
-    digest: clusterDigest(c),
-    verdict,
-    scope: scopeFor(c),
-    project: projectFor(c),
-    catalog: c.matches.map((m) => ({ name: m.name, description: m.description })),
-    target,
-    recent,
-    sources: sourcesFor(c),
-  }
+  return planInputFor({ digest: clusterDigest(c), verdict, scope: scopeFor(c), project: projectFor(c), matches: c.matches, sources: sourcesFor(c), skills, recent, expectedSha })
 }
 
 export async function runPlans(analysis: Analysis, opts: RunOptions): Promise<RunResult> {
