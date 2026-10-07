@@ -1,6 +1,6 @@
 # Skillmine — specification v0.1
 
-Status: approved design, no code yet. Date: 2026-10-07.
+Status: approved design; phases 1 to 3 implemented. Date: 2026-10-07.
 
 Skillmine mines coding-agent sessions for reusable knowledge and turns it into skills,
 runbooks and agent definitions on disk. It runs live inside Claude Code as a mod and in
@@ -181,7 +181,7 @@ The only code path that writes. Deterministic.
 
 Validation per edit, failure rejects the edit and records it in the ledger as `rejected`:
 
-- Frontmatter has `name` and a one-sentence `description` of 60 characters or less.
+- Frontmatter has `name` and a one-sentence `description` of 250 characters or less.
 - Body under 24k characters. No ticket IDs, dates, PR numbers or quoted user text.
 - No secret-shaped strings (tokens, keys, connection strings).
 - `update` requires the target to exist and its current sha256 to match what the planner
@@ -196,7 +196,7 @@ Write path:
    keep the last two.
 2. Store `before` and `after` content as sha256-addressed blobs under
    `~/.skillmine/blobs/`.
-3. Atomic write (temp file, rename), mode 0600.
+3. Atomic write (temp file, rename), mode 0644.
 4. Append `LedgerEntry` to `~/.skillmine/ledger.jsonl`.
 5. Provenance frontmatter on every written skill:
 

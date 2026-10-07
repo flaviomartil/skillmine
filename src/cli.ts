@@ -3,22 +3,33 @@ import { parseArgs } from 'node:util'
 import { stat, readFile, writeFile } from 'node:fs/promises'
 import { createReaders, defaultPaths } from './readers/index.ts'
 import { mine, parseClients } from './mine.ts'
-import { dryReport, analysisReport } from './report.ts'
+import { dryReport, analysisReport, runReport, ledgerReport } from './report.ts'
 import { analyze } from './analyze.ts'
 import { createEmbedder, parseEmbedBackend, OllamaEmbedder } from './embed/index.ts'
 import { createClassifier, parseClassifierBackend, passes } from './classify/index.ts'
 import { clusterDigest } from './cluster.ts'
+import { createPlanner, parsePlannerBackend, parsePlanOutput } from './plan/index.ts'
+import { Store } from './apply/store.ts'
+import { applyEdits } from './apply/writer.ts'
+import { undo } from './apply/undo.ts'
+import { runPlans, type RunResult } from './run.ts'
 
 const HELP = `skillmine — mine coding-agent sessions into skills
 
 usage:
-  skillmine mine [--days 30] [--clients all|claude,codex,kimi,opencode,agy] [--project <path>] --dry
+  skillmine mine [--days 30] [--clients all|claude,codex,kimi,opencode,agy] [--project <path>]
                  [--embed ollama|openai|none] [--embed-model <name>] [--sim 0.9]
-                 [--classify jev|laya|haiku] [--max-calls 50] [--out windows.jsonl] [--json] [--samples 5]
+                 [--classify jev|laya|haiku] [--max-calls 50]
+                 [--planner claude|codex|agy|kimi|opencode] [--planner-model <name>] [--allow-human-edits]
+                 [--dry] [--out clusters.jsonl] [--json] [--samples 5] [--quiet]
+  skillmine apply --edits <file|-> [--project <path>] [--allow-human-edits]
+  skillmine undo [--last | --id <edit-id> | --run <run-id>]
+  skillmine ledger [--limit 30] [--run <run-id>]
   skillmine classify --digest <file|-> [--classify jev|laya|haiku] [--skill name=description ...]
   skillmine doctor
 
-phase 2: --dry reads, embeds, clusters and (with --classify) classifies. Nothing is written to skills yet.`
+Without --dry, passed clusters go to the planner and its edits are applied with a ledger,
+backups and undo. --classify defaults to jev when not --dry.`
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv
@@ -26,9 +37,20 @@ async function main(argv: string[]): Promise<number> {
     console.log(HELP)
     return 0
   }
-  if (cmd === 'doctor') return doctor()
-  if (cmd === 'mine') return mineCmd(rest)
-  if (cmd === 'classify') return classifyCmd(rest)
+  switch (cmd) {
+    case 'doctor':
+      return doctor()
+    case 'mine':
+      return mineCmd(rest)
+    case 'classify':
+      return classifyCmd(rest)
+    case 'apply':
+      return applyCmd(rest)
+    case 'undo':
+      return undoCmd(rest)
+    case 'ledger':
+      return ledgerCmd(rest)
+  }
   console.error(`unknown command: ${cmd}\n\n${HELP}`)
   return 2
 }
@@ -61,14 +83,13 @@ async function mineCmd(argv: string[]): Promise<number> {
       sim: { type: 'string', default: '0.9' },
       classify: { type: 'string' },
       'max-calls': { type: 'string', default: '50' },
+      planner: { type: 'string', default: 'claude' },
+      'planner-model': { type: 'string' },
+      'allow-human-edits': { type: 'boolean', default: false },
       out: { type: 'string' },
     },
     strict: true,
   })
-  if (!values.dry) {
-    console.error('phase 2 implements only --dry. Re-run with --dry.')
-    return 2
-  }
   const days = Number(values.days)
   if (!Number.isFinite(days) || days <= 0) {
     console.error('--days must be a positive number')
@@ -79,14 +100,17 @@ async function mineCmd(argv: string[]): Promise<number> {
   const clients = parseClients(values.clients)
   const result = await mine(createReaders(), { days, clients, project: values.project, onProgress: (d, t) => report('reading sessions', d, t) })
 
-  const embedBackend = parseEmbedBackend(values.embed)
   let embed
   try {
-    embed = await createEmbedder(embedBackend, { model: values['embed-model'] })
+    embed = await createEmbedder(parseEmbedBackend(values.embed), { model: values['embed-model'] })
   } catch (e) {
     console.error(`warning: ${e instanceof Error ? e.message : e}; continuing without embeddings`)
   }
-  const classifier = createClassifier(parseClassifierBackend(values.classify))
+  const classifier = createClassifier(parseClassifierBackend(values.classify, values.dry ? 'none' : 'jev'))
+  if (!values.dry && !classifier) {
+    console.error('a classifier is required to mine; pass --classify jev|laya|haiku or use --dry')
+    return 2
+  }
   const analysis = await analyze(result.windows, {
     embedder: embed?.embedder,
     classifier,
@@ -97,21 +121,36 @@ async function mineCmd(argv: string[]): Promise<number> {
   })
   embed?.cache.close()
 
+  let run: RunResult | undefined
+  if (!values.dry) {
+    const planner = createPlanner(parsePlannerBackend(values.planner), values['planner-model'])
+    if (!planner) {
+      console.error('a planner is required to mine; pass --planner claude|codex|agy|kimi|opencode')
+      return 2
+    }
+    run = await runPlans(analysis, { planner, store: new Store(), project: values.project, allowHumanEdits: values['allow-human-edits'], onPhase: report })
+  }
+
   if (values.out) {
     const lines = analysis.clusters.map((c) => {
       const v = analysis.verdicts.get(c.id)
-      return JSON.stringify({ id: c.id, client: c.rep.client, project: c.rep.project, members: c.members.length, projects: c.projects, signals: c.rep.signals, matches: c.matches, verdict: v, passed: v ? passes(v) : undefined, digest: clusterDigest(c) })
+      const p = run?.planned.find((x) => x.cluster.id === c.id)
+      return JSON.stringify({ id: c.id, client: c.rep.client, project: c.rep.project, members: c.members.length, projects: c.projects, signals: c.rep.signals, matches: c.matches, verdict: v, passed: v ? passes(v) : undefined, plan: p?.plan ? { summary: p.plan.summary, edits: p.plan.edits.map((e) => ({ action: e.action, name: e.name, reason: e.reason })) } : undefined, applied: p?.applied.map((a) => a.id), rejected: p?.rejected.map((r) => r.error), digest: clusterDigest(c) })
     })
     await writeFile(values.out, lines.join('\n') + '\n')
   }
   if (values.json) {
     const { windows, ...rest } = result
-    console.log(JSON.stringify({ ...rest, windows: windows.length, analysis: { ...analysis.stats, errors: analysis.errors.length } }, null, 2))
+    console.log(JSON.stringify({ ...rest, windows: windows.length, analysis: { ...analysis.stats, errors: analysis.errors.length }, run: run ? { id: run.run, ...run.totals } : undefined }, null, 2))
   } else {
     const samples = Number(values.samples) || 5
     console.log(dryReport(result, embed || classifier ? 0 : samples))
     console.log('')
-    console.log(analysisReport(analysis, samples))
+    console.log(analysisReport(analysis, run ? 0 : samples))
+    if (run) {
+      console.log('')
+      console.log(runReport(run))
+    }
   }
   return analysis.errors.length && analysis.errors.length === analysis.stats.calls ? 1 : 0
 }
@@ -130,7 +169,7 @@ async function classifyCmd(argv: string[]): Promise<number> {
     console.error('--digest <file|-> is required')
     return 2
   }
-  const digest = values.digest === '-' ? await new Response(Bun.stdin.stream()).text() : await readFile(values.digest, 'utf8')
+  const digest = await readInput(values.digest)
   const classifier = createClassifier(parseClassifierBackend(values.classify, 'jev'))
   if (!classifier) {
     console.error('--classify must be jev, laya or haiku')
@@ -143,6 +182,67 @@ async function classifyCmd(argv: string[]): Promise<number> {
   const v = await classifier.classify({ digest: digest.trim(), catalog })
   console.log(JSON.stringify({ ...v, passed: passes(v) }, null, 2))
   return 0
+}
+
+async function applyCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      edits: { type: 'string' },
+      project: { type: 'string', default: process.cwd() },
+      'allow-human-edits': { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
+    },
+    strict: true,
+  })
+  if (!values.edits) {
+    console.error('--edits <file|-> is required')
+    return 2
+  }
+  const text = await readInput(values.edits)
+  const { edits } = parsePlanOutput(text)
+  if (!edits.length) {
+    console.log(values.json ? JSON.stringify({ applied: [], rejected: [] }) : 'no edits')
+    return 0
+  }
+  const store = new Store()
+  const res = await applyEdits(edits, { store, project: values.project ?? '', allowHumanEdits: values['allow-human-edits'] })
+  if (values.json) console.log(JSON.stringify(res, null, 2))
+  else {
+    for (const a of res.applied) console.log(`applied   ${a.action.padEnd(13)} ${a.name}  ${a.path}  (${a.id})`)
+    for (const r of res.rejected) console.log(`${r.status.padEnd(9)} ${r.action.padEnd(13)} ${r.name}  ${r.error}`)
+  }
+  return res.applied.length || !res.rejected.length ? 0 : 1
+}
+
+async function undoCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: { last: { type: 'boolean', default: false }, id: { type: 'string' }, run: { type: 'string' } },
+    strict: true,
+  })
+  const target = values.id ? { id: values.id } : values.run ? { run: values.run } : { last: true as const }
+  const res = await undo(new Store(), target)
+  for (const u of res.undone) console.log(`undone    ${u.action.padEnd(13)} ${u.name}  ${u.path}`)
+  for (const s of res.skipped) console.log(`skipped   ${s.entry.action.padEnd(13)} ${s.entry.name}  ${s.reason}`)
+  if (!res.undone.length && !res.skipped.length) console.log('nothing to undo')
+  return res.skipped.length && !res.undone.length ? 1 : 0
+}
+
+async function ledgerCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: { limit: { type: 'string', default: '30' }, run: { type: 'string' }, json: { type: 'boolean', default: false } },
+    strict: true,
+  })
+  const all = await new Store().entries()
+  const filtered = (values.run ? all.filter((e) => e.run === values.run) : all).slice(-(Number(values.limit) || 30))
+  console.log(values.json ? JSON.stringify(filtered, null, 2) : ledgerReport(filtered))
+  return 0
+}
+
+async function readInput(spec: string): Promise<string> {
+  return spec === '-' ? await new Response(Bun.stdin.stream()).text() : await readFile(spec, 'utf8')
 }
 
 async function doctor(): Promise<number> {
@@ -162,6 +262,11 @@ async function doctor(): Promise<number> {
   const ollama = new OllamaEmbedder()
   console.log(`${(await ollama.available()) ? 'ok     ' : 'missing'} ${'embeddings'.padEnd(12)} ollama ${ollama.model}`)
   console.log(`${process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY || process.env.SKILLMINE_CLASSIFIER_API_KEY ? 'ok     ' : 'missing'} ${'jev key'.padEnd(12)} TYPESAFE_API_KEY / JEV_API_KEY`)
+  for (const bin of ['claude', 'codex', 'agy', 'kimi', 'opencode']) {
+    const found = Bun.which(bin)
+    console.log(`${found ? 'ok     ' : 'missing'} ${('planner:' + bin).padEnd(12)} ${found ?? ''}`)
+  }
+  console.log(`store        ${new Store().root}`)
   return rows.some(([, , ok]) => ok) ? 0 : 1
 }
 

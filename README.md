@@ -11,7 +11,7 @@ or agent definition on disk with full provenance and one-command undo.
 skillmine undo --last
 ```
 
-Status: phase 1 (readers and dry run). See [SPEC.md](SPEC.md) for the full design.
+Status: phase 3 (readers, classifier, planner, apply, ledger, undo). See [SPEC.md](SPEC.md) for the full design.
 
 ## Try it
 
@@ -38,7 +38,30 @@ echo 'user: no, the lock is in redis' | bun run src/cli.ts classify --digest - -
 
 Classifier backends: `jev` (TypeSafe, `TYPESAFE_API_KEY`), `laya` (laya-server at
 `SKILLMINE_LAYA_URL`, default `http://localhost:8000`), `haiku` (`claude -p`, costs more
-per call). The planner and apply steps arrive in phase 3.
+per call).
+
+## Mine for real
+
+```sh
+bun run src/cli.ts mine --days 3 --classify jev --planner claude          # Jev gates, Claude plans, edits land
+bun run src/cli.ts mine --days 3 --planner codex                          # or agy, kimi, opencode
+bun run src/cli.ts ledger                                                 # what was written, by whom, from where
+bun run src/cli.ts undo --last                                            # or --id <edit> / --run <run>
+echo '{"edits":[...]}' | bun run src/cli.ts apply --edits - --project .   # apply edits planned elsewhere (the mod uses this)
+```
+
+Clusters that pass the classifier go to the planner, which answers with typed edits
+(`create`, `update`, `add_reference`, `archive`). Every edit is validated (name shape, no
+secrets, no dates or ticket IDs, read-before-write), the skills tree is snapshotted to
+`~/.skillmine/backups/` before the first write of a run, before and after blobs go to
+`~/.skillmine/blobs/`, and every outcome is appended to `~/.skillmine/ledger.jsonl`.
+Skills Skillmine did not create are never rewritten: an `update` on a human-authored skill
+becomes a reference file under it. Pass `--allow-human-edits` to lift that.
+
+Skills land in `<project>/.agents/skills/<name>/SKILL.md` (local) or `~/.agents/skills`
+(global, when the lesson was seen in two or more projects), with a symlink into each
+client's skills dir that exists, and frontmatter carrying `created_by: skillmine` plus the
+session refs it came from.
 
 ## Why
 

@@ -81,3 +81,26 @@ function indent(s: string): string {
     .map((l) => '    ' + l)
     .join('\n')
 }
+
+export function runReport(run: import('./run.ts').RunResult): string {
+  const lines: string[] = []
+  const t = run.totals
+  lines.push(`run ${run.run}`)
+  lines.push(`  clusters planned ${t.clusters}, planner calls ${t.plannerCalls}, edits proposed ${t.edits}, applied ${t.applied}, rejected ${t.rejected}, planner errors ${t.errors}`)
+  for (const p of run.planned) {
+    if (!p.plan && !p.error) continue
+    lines.push(`--- ${p.cluster.id}  ${p.error ? 'ERROR ' + p.error.slice(0, 160) : p.plan!.summary || '(no summary)'}`)
+    for (const a of p.applied) lines.push(`    applied   ${a.action.padEnd(13)} ${a.name}  ${a.path}`)
+    for (const r of p.rejected) lines.push(`    ${r.status.padEnd(9)} ${r.action.padEnd(13)} ${r.name}  ${r.error}`)
+    if (p.plan && !p.plan.edits.length) lines.push('    (no edits)')
+  }
+  if (t.applied) lines.push(`undo everything from this run: skillmine undo --run ${run.run}`)
+  return lines.join('\n')
+}
+
+export function ledgerReport(entries: import('./apply/store.ts').LedgerEntry[]): string {
+  if (!entries.length) return 'ledger is empty'
+  return entries
+    .map((e) => `${new Date(e.ts).toISOString().slice(0, 16)}  ${e.status.padEnd(11)} ${e.action.padEnd(13)} ${e.name.padEnd(32)} ${e.id}  ${e.error ?? e.path}`)
+    .join('\n')
+}
