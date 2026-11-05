@@ -1,4 +1,4 @@
-import { homedir } from 'node:os'
+import { defaultStoreRoot } from '../apply/store.ts'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import type { Planner, PlanInput, PlanOutput, PlannerBackend } from './types.ts'
@@ -7,7 +7,7 @@ import { plannerPrompt, parsePlanOutput } from './prompt.ts'
 export type Runner = (argv: string[], stdin: string, cwd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>
 
 export const defaultRunner: Runner = async (argv, stdin, cwd) => {
-  const proc = Bun.spawn(argv, { cwd, stdin: new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn(argv, { cwd, stdin: new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe', env: { ...process.env, SKILLMINE_INDEX_SUSPENDED: '1' } })
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   return { exitCode, stdout, stderr }
 }
@@ -51,7 +51,7 @@ export class CommandPlanner implements Planner {
     this.name = opts.name
     this.argv = opts.argv
     this.useStdin = opts.stdin ?? !opts.argv.includes(PROMPT)
-    this.cwd = opts.cwd ?? process.env.SKILLMINE_PLANNER_CWD ?? join(homedir(), '.skillmine', 'empty')
+    this.cwd = opts.cwd ?? (process.env.SKILLMINE_PLANNER_CWD || undefined) ?? join(defaultStoreRoot(), 'empty')
     this.runner = opts.runner ?? defaultRunner
   }
 

@@ -1,5 +1,5 @@
-import { readFile, unlink, lstat, rename, mkdir, readdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile, unlink, lstat, rename, mkdir, readdir, symlink, readlink, realpath } from 'node:fs/promises'
+import { dirname, join, resolve, basename } from 'node:path'
 import { Store, sha256, type LedgerEntry } from './store.ts'
 import { atomicWrite, removeDir } from './writer.ts'
 
@@ -32,6 +32,18 @@ export async function undo(store: Store, target: UndoTarget): Promise<UndoResult
   return { undone, skipped }
 }
 
+async function realish(path: string): Promise<string> {
+  try {
+    return await realpath(path)
+  } catch {
+    try {
+      return join(await realpath(dirname(path)), basename(path))
+    } catch {
+      return path
+    }
+  }
+}
+
 async function currentSha(path: string): Promise<string | null> {
   try {
     return sha256(await readFile(path, 'utf8'))
@@ -52,21 +64,46 @@ async function revert(store: Store, entry: LedgerEntry): Promise<void> {
     }
     await mkdir(dirname(dest), { recursive: true })
     await rename(entry.archivedTo, dest)
+    for (const link of entry.symlinks ?? []) {
+      try {
+        await lstat(link)
+      } catch {
+        await mkdir(dirname(link), { recursive: true }).catch(() => undefined)
+        await symlink(dest, link).catch(() => undefined)
+      }
+    }
     return
   }
   const now = await currentSha(entry.path)
   if (now !== entry.after) throw new Error(`"${entry.path}" changed after Skillmine wrote it; refusing to undo`)
   if (entry.action === 'create') {
+    const dir = dirname(entry.path)
+    const all = await store.entries()
+    const reverted = new Set(all.filter((e) => e.rollbackOf).map((e) => e.rollbackOf!))
+    const written = new Map<string, string | null>()
+    for (const e of all) if (e.status === 'applied' && e.action === 'add_reference' && e.name === entry.name && !reverted.has(e.id)) written.set(e.path, e.after)
+    const extras = (await readdir(dir)).filter((f) => f !== 'SKILL.md' && f !== 'references' && !f.startsWith('.usage.'))
+    const refsDir = join(dir, 'references')
+    try {
+      for (const f of await readdir(refsDir)) {
+        const expected = written.get(join(refsDir, f))
+        const current = expected ? await currentSha(join(refsDir, f)) : null
+        if (!expected || current !== expected) extras.push(`references/${f}`)
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+    }
+    if (extras.length) throw new Error(`"${dir}" has files Skillmine did not write (${extras.join(', ')}); refusing to delete`)
+    const realDir = await realish(dir)
     for (const link of entry.symlinks ?? []) {
       try {
-        if ((await lstat(link)).isSymbolicLink()) await unlink(link)
+        if (!(await lstat(link)).isSymbolicLink()) continue
+        const to = resolve(dirname(link), await readlink(link))
+        if (to === dir || (await realish(to)) === realDir) await unlink(link)
       } catch {
         continue
       }
     }
-    const dir = dirname(entry.path)
-    const extras = (await readdir(dir)).filter((f) => f !== 'SKILL.md' && f !== 'references')
-    if (extras.length) throw new Error(`"${dir}" has files Skillmine did not write (${extras.join(', ')}); refusing to delete`)
     await removeDir(dir)
     return
   }

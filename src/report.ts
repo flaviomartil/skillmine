@@ -105,17 +105,21 @@ export function ledgerReport(entries: import('./apply/store.ts').LedgerEntry[]):
     .join('\n')
 }
 
-export function curateReport(res: import('./curate/index.ts').CurateResult, dry: boolean): string {
+export function curateReport(res: import('./curate/index.ts').CurateResult, dryRun: boolean): string {
+  const dry = dryRun || res.readOnly
   const mined = res.rows.filter((r) => r.skill.createdBy === 'skillmine')
   const by = (v: import('./curate/index.ts').Verdict) => mined.filter((r) => r.verdict === v)
   const lines = [
     `curate${dry ? ' (dry)' : ''}: ${res.rows.length} skills in catalog, ${mined.length} created by skillmine`,
     `scanned ${res.scanned.sessions} sessions / ${res.scanned.turns} turns, ${res.scanned.uses} new uses recorded`,
-    `active ${by('active').length} · fresh ${by('fresh').length} · stale ${by('stale').length} · archive ${by('archive').length} · pinned ${by('pinned').length}`,
+    `active ${by('active').length} · fresh ${by('fresh').length} · probation ${by('probation').length} · unreadable ${by('unreadable').length} · locked ${by('locked').length} · stale ${by('stale').length} · archive ${by('archive').length} · pinned ${by('pinned').length}`,
   ]
-  const show = mined.filter((r) => r.verdict === 'stale' || r.verdict === 'archive').sort((a, b) => b.idleDays - a.idleDays)
-  for (const r of show) lines.push(`  ${r.verdict.padEnd(8)} ${r.skill.name.padEnd(36)} idle ${String(r.idleDays).padStart(3)}d  uses ${r.usage.use_count}  ${r.skill.realpath}`)
+  const show = mined.filter((r) => r.verdict === 'stale' || r.verdict === 'archive' || r.verdict === 'unreadable' || r.verdict === 'locked').sort((a, b) => b.idleDays - a.idleDays)
+  for (const r of show) lines.push(`  ${r.verdict.padEnd(10)} ${r.skill.name.padEnd(36)} idle ${String(r.idleDays).padStart(3)}d  uses ${r.usage.use_count}  ${r.skill.realpath}${r.error ? `  (${r.error})` : ''}`)
+  if (res.readOnly && !dryRun) lines.push('scoped to a project: report only, no uses recorded and nothing archived (run curate without --project to record)')
+  if (res.scanErrors.length) lines.push(`scan incomplete for ${res.scanErrors.join(', ')}: their uses are not recorded this run and the watermark did not move`)
+  if (res.archiveDisabled) lines.push(res.archiveDisabled)
   if (res.archived.length) lines.push(`archived ${res.archived.length} (run ${res.run}; undo with: skillmine undo --run ${res.run})`)
-  else if (!dry && by('archive').length) lines.push(`archive candidates were rejected: ${res.rejected.map((r) => r.error).join('; ')}`)
+  else if (!dry && !res.archiveDisabled && by('archive').length) lines.push(`archive candidates were rejected: ${res.rejected.map((r) => r.error).join('; ')}`)
   return lines.join('\n')
 }

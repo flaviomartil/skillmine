@@ -182,6 +182,42 @@ describe('kimi reader', () => {
     expect(kimiToolFailed('<system>Command exited with code 1</system>')).toBe(true)
     expect(kimiToolFailed('plain output')).toBe(false)
   })
+  test('replays modern kimi-code wire.jsonl with state.json and skips non-user origins', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'skillmine-kimi-wire-'))
+    try {
+      const sdir = join(tmp, '.kimi-code', 'sessions', 'ws-ledger', 'kimi-wire-1')
+      await mkdir(join(sdir, 'agents', 'main'), { recursive: true })
+      await writeFile(join(sdir, 'state.json'), JSON.stringify({ id: 'kimi-wire-1', cwd: '/work/ledger', updatedAt: NOW - 1000 }))
+      await writeFile(
+        join(sdir, 'agents', 'main', 'wire.jsonl'),
+        jsonl([
+          { type: 'metadata', protocol_version: '1.5' },
+          { type: 'context.append_message', time: NOW - 3000, message: { role: 'user', content: [{ type: 'text', text: 'Run ledger tests' }] } },
+          { type: 'context.append_message', time: NOW - 2900, message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>injected</system-reminder>' }], origin: { kind: 'injection' } } },
+          { type: 'context.append_message', time: NOW - 2800, message: { role: 'user', content: [{ type: 'text', text: 'Expanded slash prompt body' }], origin: { kind: 'skill_activation', trigger: 'user-slash' } } },
+          { type: 'context.append_loop_event', time: NOW - 2000, event: { type: 'step.begin', uuid: 'st-1' } },
+          { type: 'context.append_loop_event', time: NOW - 1900, event: { type: 'content.part', stepUuid: 'st-1', part: { type: 'text', text: 'Running ' } } },
+          { type: 'context.append_loop_event', time: NOW - 1800, event: { type: 'content.part', stepUuid: 'st-1', part: { type: 'text', text: 'tests.' } } },
+          { type: 'context.append_loop_event', time: NOW - 1700, event: { type: 'tool.call', stepUuid: 'st-1', toolCallId: 'tc-1', name: 'Shell', args: { command: 'cargo test' } } },
+          { type: 'context.append_loop_event', time: NOW - 1600, event: { type: 'tool.result', toolCallId: 'tc-1', result: { output: 'error', isError: true } } },
+        ]),
+      )
+      const r = createReaders({ ...paths, kimi: join(tmp, '.kimi', 'sessions'), kimiCode: join(tmp, '.kimi-code', 'sessions') }).kimi
+      const refs = await r.discover({ since: NOW - 86_400_000 })
+      expect(refs).toHaveLength(1)
+      expect(refs[0]!.id).toBe('kimi-wire-1')
+      expect(refs[0]!.project).toBe('/work/ledger')
+      const turns = await r.read(refs[0]!)
+      expect(turns).toHaveLength(2)
+      expect(turns[0]!.role).toBe('user')
+      expect(turns[0]!.text).toBe('Run ledger tests')
+      expect(turns[1]!.role).toBe('assistant')
+      expect(turns[1]!.text).toBe('Running tests.')
+      expect(turns[1]!.tools[0]).toEqual({ name: 'Shell', arg: 'cargo test', failed: true })
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('opencode reader', () => {
@@ -213,6 +249,31 @@ describe('antigravity reader', () => {
   test('workspaceFromUris', () => {
     expect(workspaceFromUris('["file:///tmp/a%20b"]')).toBe('/tmp/a b')
     expect(workspaceFromUris('nope')).toBe('')
+  })
+  test('discovers and reads brain transcript.jsonl when .db is absent', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'skillmine-agy-brain-'))
+    try {
+      const logDir = join(tmp, 'brain', 'agy-brain-1', '.system_generated', 'logs')
+      await mkdir(logDir, { recursive: true })
+      await writeFile(
+        join(logDir, 'transcript.jsonl'),
+        jsonl([
+          { created_at: RECENT.toISOString(), role: 'user', content: 'Run the payments tests' },
+          { created_at: RECENT.toISOString(), role: 'assistant', content: 'Running.', tool_calls: [{ id: 't1', name: 'run_command', args: { CommandLine: 'cargo test', Cwd: '/work/payments' } }] },
+          { created_at: RECENT.toISOString(), role: 'tool', content: 'Exit code: 101\nerror: failed' },
+        ]),
+      )
+      const r = createReaders({ ...paths, antigravity: tmp }).antigravity
+      const refs = await r.discover({ since: NOW - 86_400_000 })
+      expect(refs.map((x) => x.id)).toEqual(['agy-brain-1'])
+      const turns = await r.read(refs[0]!)
+      expect(turns).toHaveLength(2)
+      expect(turns[0]!.role).toBe('user')
+      expect(turns[0]!.project).toBe('/work/payments')
+      expect(turns[1]!.tools[0]).toEqual({ name: 'run_command', arg: 'cargo test', failed: true })
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
   })
 })
 

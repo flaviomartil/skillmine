@@ -1,11 +1,11 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
-import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, readFile, writeFile, utimes, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Turn, Reader, SessionRef } from '../src/types.ts'
 import type { Classifier, Verdict } from '../src/classify/types.ts'
 import type { Planner, PlanOutput } from '../src/plan/types.ts'
-import { gate, matchesSession, freshDigest, readGateState } from '../src/gate.ts'
+import { gate, matchesSession, freshDigest, readGateState, cleanupGateState, DAY, GATE_LOG_KEEP } from '../src/gate.ts'
 import { Store } from '../src/apply/store.ts'
 import { defaultLayout } from '../src/apply/paths.ts'
 
@@ -17,9 +17,45 @@ const long = (s: string) => s.repeat(12)
 
 describe('matchesSession', () => {
   const ref: SessionRef = { client: 'codex', id: 'rollout-2026-10-07T05-14-54-01a1156e-0754-7f52-8c7a-724eb94e4923', path: '/x/rollout-2026-10-07T05-14-54-01a1156e-0754-7f52-8c7a-724eb94e4923.jsonl', project: '', mtime: 0 }
+  const bareRef: SessionRef = { client: 'claude', id: '01a1156e-0754-7f52-8c7a-724eb94e4923', path: '/x/01a1156e-0754-7f52-8c7a-724eb94e4923.jsonl', project: '', mtime: 0 }
   test('matches the thread uuid inside a codex rollout name', () => {
     expect(matchesSession(ref, '01a1156e-0754-7f52-8c7a-724eb94e4923')).toBe(true)
     expect(matchesSession(ref, 'deadbeef')).toBe(false)
+  })
+  test('matches when id has a session_ prefix and ref.id is a bare UUID', () => {
+    expect(matchesSession(bareRef, 'session_01a1156e-0754-7f52-8c7a-724eb94e4923')).toBe(true)
+    expect(matchesSession(ref, 'session_01a1156e-0754-7f52-8c7a-724eb94e4923')).toBe(true)
+    expect(matchesSession(bareRef, 'session_deadbeef')).toBe(false)
+  })
+})
+
+describe('cleanupGateState', () => {
+  test('prunes old gate state json files and truncates oversized gate.log while stripping NUL bytes', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'skillmine-gate-clean-'))
+    try {
+      const gateDir = join(tmp, '.skillmine', 'gate')
+      await mkdir(gateDir, { recursive: true })
+      const staleFile = join(gateDir, 'claude-old.json')
+      const freshFile = join(gateDir, 'claude-fresh.json')
+      await writeFile(staleFile, '{"stops":1}\n')
+      await writeFile(freshFile, '{"stops":2}\n')
+      const oldDate = new Date(Date.now() - 8 * DAY)
+      await utimes(staleFile, oldDate, oldDate)
+
+      const logFile = join(tmp, '.skillmine', 'gate.log')
+      const payload = '\x00\x00' + 'a'.repeat(2 * 1024 * 1024 + 50_000) + '\n{"tail":true}\n'
+      await writeFile(logFile, payload)
+
+      await cleanupGateState(tmp)
+      await expect(stat(staleFile)).rejects.toThrow()
+      expect((await stat(freshFile)).isFile()).toBe(true)
+      const trimmed = await readFile(logFile, 'utf8')
+      expect(trimmed.includes('\x00')).toBe(false)
+      expect(Buffer.byteLength(trimmed, 'utf8')).toBeLessThanOrEqual(GATE_LOG_KEEP)
+      expect(trimmed.endsWith('{"tail":true}\n')).toBe(true)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
   })
 })
 

@@ -1,9 +1,11 @@
 import type { Client, Reader, SessionRef, Window, Signal } from './types.ts'
 import { CLIENTS } from './types.ts'
 import { sliceSession, windowScore, dropAutomated } from './windows.ts'
+import { isInternalProject, internalRoots } from './util/internal.ts'
 
 export type MineOptions = {
   days: number
+  since?: number
   clients: Client[]
   project?: string
   now?: number
@@ -46,7 +48,8 @@ function emptyStats(): ClientStats {
 
 export async function mine(readers: Record<Client, Reader>, opts: MineOptions): Promise<MineResult> {
   const now = opts.now ?? Date.now()
-  const since = now - opts.days * 86_400_000
+  const since = opts.since ?? now - opts.days * 86_400_000
+  const roots = internalRoots()
   const perClient = Object.fromEntries(CLIENTS.map((c) => [c, emptyStats()])) as Record<Client, ClientStats>
   const signals: Record<Signal, number> = { correction: 0, 'fail-then-pass': 0, explanation: 0, decision: 0 }
   const projects: Record<string, number> = {}
@@ -69,9 +72,10 @@ export async function mine(readers: Record<Client, Reader>, opts: MineOptions): 
         const turns = await readers[ref.client].read(ref)
         const project = turns[0]?.project ?? ref.project
         if (opts.project && project && !project.startsWith(opts.project)) continue
+        if (isInternalProject(project, roots)) continue
         stats.sessions++
         stats.turns += turns.length
-        for (const w of sliceSession(turns)) collected.push(w)
+        for (const w of sliceSession(turns)) if (opts.since === undefined || w.end >= opts.since) collected.push(w)
       } catch {
         stats.errors++
       } finally {

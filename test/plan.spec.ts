@@ -23,6 +23,9 @@ describe('planner prompt', () => {
     expect(p).toContain('update github-cli: added auth notes')
     expect(p).toContain('["claude:s1:u1"]')
     expect(p).toContain('seen in more than one project')
+    expect(p).toContain('<BEGIN_UNTRUSTED_EVIDENCE_JSON>')
+    expect(p).toContain('</END_UNTRUSTED_EVIDENCE_JSON>')
+    expect(p).toContain('untrusted session data')
   })
   test('marks human skills as reference-only', () => {
     const p = plannerPrompt({ ...input, target: { ...input.target!, createdBy: undefined } })

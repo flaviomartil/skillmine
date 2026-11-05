@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile, rename, unlink, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, unlink, appendFile, readdir, stat, rm, open } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Client, Reader, SessionRef, Turn } from './types.ts'
 import { digestTurn, MAX_DIGEST_CHARS } from './windows.ts'
@@ -12,6 +13,9 @@ import { applyEdits } from './apply/writer.ts'
 import type { Layout } from './apply/paths.ts'
 
 export const DAY = 86_400_000
+export const GATE_STATE_MAX_AGE_MS = 7 * DAY
+export const GATE_LOG_TRIM_ABOVE = 2 * 1024 * 1024
+export const GATE_LOG_KEEP = 1024 * 1024
 
 export type GateState = { stops: number; gatedTurns: number; lastPlanned: number; updated: number }
 
@@ -74,7 +78,60 @@ async function writeGateState(path: string, state: GateState): Promise<void> {
 }
 
 export function matchesSession(ref: SessionRef, id: string): boolean {
-  return ref.id === id || ref.id.endsWith(id) || ref.id.endsWith(`-${id}`) || ref.path.includes(id)
+  const bare = id.replace(/^session_/, '')
+  return (
+    ref.id === id ||
+    ref.id === bare ||
+    (Boolean(ref.id) && id.endsWith(ref.id)) ||
+    ref.id.endsWith(id) ||
+    (Boolean(bare) && ref.id.endsWith(bare)) ||
+    ref.id.endsWith(`-${id}`) ||
+    (Boolean(bare) && ref.id.endsWith(`-${bare}`)) ||
+    ref.path.includes(id) ||
+    (Boolean(bare) && ref.path.includes(bare))
+  )
+}
+
+export async function cleanupGateState(home: string | Store = homedir(), now = Date.now(), extraStateDir?: string): Promise<void> {
+  const roots = typeof home === 'string' ? Array.from(new Set([join(home, '.skillmine'), home])) : [home.root]
+  const gateDirs = Array.from(new Set([...roots.map((r) => join(r, 'gate')), ...(extraStateDir ? [extraStateDir] : [])]))
+  for (const dir of gateDirs) {
+    try {
+      for (const f of await readdir(dir)) {
+        if (!/\.(json|lock)$/.test(f)) continue
+        const p = join(dir, f)
+        try {
+          if (now - (await stat(p)).mtimeMs > GATE_STATE_MAX_AGE_MS) await rm(p, { force: true })
+        } catch {
+          continue
+        }
+      }
+    } catch {
+      continue
+    }
+  }
+  for (const r of roots) {
+    const log = join(r, 'gate.log')
+    try {
+      const st = await stat(log)
+      if (st.size > GATE_LOG_TRIM_ABOVE) {
+        const cleaned = (await readFile(log, 'utf8')).replace(/\x00+/g, '')
+        const tail = Buffer.from(cleaned, 'utf8')
+        const sliced = tail.subarray(Math.max(0, tail.length - GATE_LOG_KEEP))
+        const handle = await open(log, 'w')
+        try {
+          await handle.write(sliced)
+        } finally {
+          await handle.close()
+        }
+      } else if (st.size > 0) {
+        const raw = await readFile(log, 'utf8')
+        if (raw.includes('\x00')) await writeFile(log, raw.replace(/\x00+/g, ''))
+      }
+    } catch {
+      continue
+    }
+  }
 }
 
 export function freshDigest(turns: Turn[], from: number, max = MAX_DIGEST_CHARS): string {
@@ -112,6 +169,7 @@ export async function gate(opts: GateOptions): Promise<GateResult> {
   const every = Math.max(1, opts.every ?? 3)
   const cooldownMs = opts.cooldownMs ?? 20 * 60_000
   const dir = opts.stateDir ?? gateStateDir(opts.store)
+  await cleanupGateState(opts.home ?? opts.store, now, dir)
   const file = stateFile(dir, opts.client, opts.session)
   const state = await readGateState(file)
   state.stops += 1

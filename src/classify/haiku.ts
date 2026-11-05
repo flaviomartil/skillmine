@@ -1,4 +1,4 @@
-import { homedir } from 'node:os'
+import { defaultStoreRoot } from '../apply/store.ts'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import type { Classifier, ClassifyInput, Verdict, Kind, Novelty } from './types.ts'
@@ -16,7 +16,7 @@ const KINDS = new Set<Kind>(['procedure', 'fact', 'correction', 'gotcha', 'trade
 const NOVELTIES = new Set<Novelty>(['new', 'update', 'duplicate'])
 
 export const defaultRunner: Runner = async (argv, stdin, cwd) => {
-  const proc = Bun.spawn(argv, { cwd, stdin: new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn(argv, { cwd, stdin: new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe', env: { ...process.env, SKILLMINE_INDEX_SUSPENDED: '1' } })
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   return { exitCode, stdout, stderr }
 }
@@ -29,7 +29,7 @@ export class HaikuClassifier implements Classifier {
 
   constructor(opts: HaikuOptions = {}) {
     this.command = opts.command ?? (process.env.SKILLMINE_HAIKU_COMMAND ? process.env.SKILLMINE_HAIKU_COMMAND.split(' ') : ['claude', '-p', '--model', 'haiku', '--output-format', 'json'])
-    this.cwd = opts.cwd ?? process.env.SKILLMINE_HAIKU_CWD ?? join(homedir(), '.skillmine', 'empty')
+    this.cwd = opts.cwd ?? (process.env.SKILLMINE_HAIKU_CWD || undefined) ?? join(defaultStoreRoot(), 'empty')
     this.runner = opts.runner ?? defaultRunner
   }
 

@@ -34,6 +34,38 @@ export function localSkillDirs(project: string): string[] {
   return [join(project, '.agents', 'skills'), join(project, '.claude', 'skills')]
 }
 
+export function unquote(raw: string): string {
+  let v = raw.trim()
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    try {
+      v = JSON.parse(v) as string
+    } catch {
+      v = v.slice(1, -1)
+    }
+  } else if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) v = v.slice(1, -1).replace(/''/g, "'")
+  return v
+}
+
+export function parseSources(text: string): string[] {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)
+  if (!m) return []
+  const out: string[] = []
+  let inList = false
+  for (const line of m[1]!.split(/\r?\n/)) {
+    if (/^sources:\s*$/.test(line)) {
+      inList = true
+      continue
+    }
+    if (!inList) continue
+    if (!line.trim()) continue
+    const item = /^\s+-\s+(.*)$/.exec(line)
+    if (!item) break
+    const v = unquote(item[1]!)
+    if (v) out.push(v)
+  }
+  return out
+}
+
 export function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
   if (!m) return { fields: {}, body: text }
@@ -41,9 +73,7 @@ export function parseFrontmatter(text: string): { fields: Record<string, string>
   for (const line of m[1]!.split(/\r?\n/)) {
     const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
     if (!kv) continue
-    let v = kv[2]!.trim()
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
-    fields[kv[1]!] = v
+    fields[kv[1]!] = unquote(kv[2]!)
   }
   return { fields, body: m[2] ?? '' }
 }

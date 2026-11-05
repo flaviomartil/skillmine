@@ -63,7 +63,7 @@ export async function runPlans(analysis: Analysis, opts: RunOptions): Promise<Ru
   const skillsList = await discoverSkills({ home: opts.home, project: opts.project })
   const skills = new Map(skillsList.map((s) => [s.name, s]))
   const recent = await opts.store.recentSummaries(20)
-  const expectedSha = new Map<string, string>()
+  const shaByCluster = new Map<string, Map<string, string>>()
   const targets = analysis.clusters.filter((c) => {
     const v = analysis.verdicts.get(c.id)
     return v && passes(v)
@@ -76,6 +76,8 @@ export async function runPlans(analysis: Analysis, opts: RunOptions): Promise<Ru
       const c = queue.shift()
       if (!c) return
       const verdict = analysis.verdicts.get(c.id)
+      const expectedSha = new Map<string, string>()
+      shaByCluster.set(c.id, expectedSha)
       const input = await buildPlanInput(c, verdict, skills, recent, expectedSha)
       const item: PlannedCluster = { cluster: c, input, applied: [], rejected: [] }
       try {
@@ -101,7 +103,7 @@ export async function runPlans(analysis: Analysis, opts: RunOptions): Promise<Ru
       project: item.input.project || opts.project || '',
       run,
       catalog: skillsList,
-      expectedSha,
+      expectedSha: shaByCluster.get(item.cluster.id) ?? new Map<string, string>(),
       allowHumanEdits: opts.allowHumanEdits,
     })
     item.applied = res.applied

@@ -8,7 +8,7 @@ type PartData = {
   type?: string
   text?: string
   tool?: string
-  state?: { status?: string; input?: unknown }
+  state?: { status?: string; input?: unknown; time?: { start?: number; end?: number } }
 }
 
 export class OpenCodeReader implements Reader {
@@ -74,10 +74,13 @@ export class OpenCodeReader implements Reader {
         if (!project && data.path?.cwd) project = data.path.cwd
         const tools: ToolCall[] = []
         const texts: string[] = []
+        let ts = data.time?.created ?? m.time_created
         for (const p of partsStmt.all(m.id)) {
           const part = (parseJsonSafe(p.data) ?? {}) as PartData
           if (part.type === 'text' && part.text) texts.push(part.text)
           else if (part.type === 'tool') {
+            const at = part.state?.time?.end ?? part.state?.time?.start
+            if (typeof at === 'number' && Number.isFinite(at) && at > ts) ts = at
             tools.push({
               name: part.tool ?? 'tool',
               arg: firstStringArg(part.state?.input),
@@ -92,7 +95,9 @@ export class OpenCodeReader implements Reader {
           client: 'opencode',
           session: ref.id,
           project,
-          ts: data.time?.created ?? m.time_created,
+          ts,
+          approxTs: true,
+          turnId: m.id,
           role,
           text,
           tools,

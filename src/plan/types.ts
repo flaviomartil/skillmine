@@ -8,7 +8,7 @@ type EditBase = { reason: string; sources: string[] }
 export type CreateEdit = EditBase & { action: 'create'; kind: ArtifactKind; name: string; scope: Scope; description: string; content: string }
 export type UpdateEdit = EditBase & { action: 'update'; name: string; content: string }
 export type AddReferenceEdit = EditBase & { action: 'add_reference'; name: string; file: string; content: string }
-export type ArchiveEdit = EditBase & { action: 'archive'; name: string }
+export type ArchiveEdit = EditBase & { action: 'archive'; name: string; path?: string }
 
 export type Edit = CreateEdit | UpdateEdit | AddReferenceEdit | ArchiveEdit
 

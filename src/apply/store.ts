@@ -1,7 +1,7 @@
-import { mkdirSync, existsSync, readdirSync, unlinkSync } from 'node:fs'
-import { appendFile, readFile, writeFile, stat } from 'node:fs/promises'
+import { mkdirSync, existsSync, readdirSync } from 'node:fs'
+import { appendFile, readFile, writeFile, stat, rm, open } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, basename, dirname } from 'node:path'
+import { join, basename, dirname, isAbsolute, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Edit } from '../plan/types.ts'
 
@@ -30,8 +30,10 @@ export function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
-export function defaultStoreRoot(home = homedir()): string {
-  return process.env.SKILLMINE_HOME ?? join(home, '.skillmine')
+export function defaultStoreRoot(home = homedir(), env: Record<string, string | undefined> = process.env): string {
+  const configured = env.SKILLMINE_HOME?.trim()
+  if (!configured) return join(home, '.skillmine')
+  return isAbsolute(configured) ? configured : resolve(home, configured)
 }
 
 export class Store {
@@ -69,7 +71,23 @@ export class Store {
   }
 
   async append(entry: LedgerEntry): Promise<void> {
-    await appendFile(this.ledgerPath, JSON.stringify(entry) + '\n')
+    let prefix = ''
+    try {
+      const fh = await open(this.ledgerPath, 'r')
+      try {
+        const { size } = await fh.stat()
+        if (size > 0) {
+          const last = Buffer.alloc(1)
+          await fh.read(last, 0, 1, size - 1)
+          if (last[0] !== 10) prefix = '\n'
+        }
+      } finally {
+        await fh.close()
+      }
+    } catch {
+      prefix = ''
+    }
+    await appendFile(this.ledgerPath, prefix + JSON.stringify(entry) + '\n')
   }
 
   async entries(): Promise<LedgerEntry[]> {
@@ -107,17 +125,29 @@ export class Store {
     }
     const label = slugPath(dir)
     const out = join(this.backupsDir, `${label}.${run}.tar.gz`)
-    const proc = Bun.spawn(['tar', '-czf', out, '-C', dirname(dir), basename(dir)], { stdout: 'ignore', stderr: 'pipe' })
-    const code = await proc.exited
-    if (code !== 0) throw new Error(`backup of ${dir} failed: ${await new Response(proc.stderr).text()}`)
+    const marker = `${out}.ok`
+    if (existsSync(out) && existsSync(marker)) return out
+    for (const leftover of [out, marker]) await rm(leftover, { force: true })
+    const proc = Bun.spawn([process.env.SKILLMINE_TAR || 'tar', '-czhf', out, '-C', dirname(dir), '--', basename(dir)], { stdout: 'ignore', stderr: 'pipe' })
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+    const warned = code === 1 && (await stat(out).then((st) => st.size > 0, () => false))
+    if (code !== 0 && !warned) {
+      await rm(out, { force: true })
+      throw new Error(`backup of ${dir} failed: ${err}`)
+    }
+    await writeFile(marker, String(Date.now()))
     const siblings = readdirSync(this.backupsDir)
       .filter((f) => f.startsWith(label + '.') && f.endsWith('.tar.gz'))
       .sort()
-    for (const old of siblings.slice(0, Math.max(0, siblings.length - keep))) unlinkSync(join(this.backupsDir, old))
+    for (const old of siblings.slice(0, Math.max(0, siblings.length - keep))) {
+      await rm(join(this.backupsDir, old), { force: true })
+      await rm(join(this.backupsDir, `${old}.ok`), { force: true })
+    }
     return out
   }
 }
 
 function slugPath(p: string): string {
-  return p.replace(/^\/+/, '').replace(/[^A-Za-z0-9]+/g, '-').slice(0, 80)
+  const slug = p.replace(/^\/+/, '').replace(/[^A-Za-z0-9]+/g, '-').slice(0, 70)
+  return `${slug}-${createHash('sha256').update(p).digest('hex').slice(0, 8)}`
 }

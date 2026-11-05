@@ -18,6 +18,8 @@ export type Turn = {
   text: string
   tools: ToolCall[]
   sidechain: boolean
+  approxTs?: boolean
+  turnId?: string
 }
 
 export type SessionRef = {

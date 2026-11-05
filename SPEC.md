@@ -181,9 +181,22 @@ The only code path that writes. Deterministic.
 
 Validation per edit, failure rejects the edit and records it in the ledger as `rejected`:
 
-- Frontmatter has `name` and a one-sentence `description` of 250 characters or less.
-- Body under 24k characters. No ticket IDs, dates, PR numbers or quoted user text.
-- No secret-shaped strings (tokens, keys, connection strings).
+- Frontmatter has `name` and a one-sentence `description` of 250 characters or less, on a
+  single line, with no secret-shaped string or TODO placeholder in it.
+- Body under 24k characters and 300 non-blank lines (`SKILLMINE_BODY_MAX_LINES`, read when
+  the check runs; the planner prompt states the same number). No
+  ticket IDs, dates, PR numbers, quoted user text or TODO placeholders.
+- Every source is free of control characters, newlines and the sequence `-->`, on every
+  action, because sources are written into frontmatter and the reference header.
+- No secret-shaped strings (tokens, keys, connection strings): `sk-`/`sk_` keys including
+  `sk-ant-` and `sk-proj-`, GitHub and AWS keys, bearer tokens, private keys, credential URLs,
+  and assignments to `password`, `secret`, `token`, `api_key` or `client_secret` names, with
+  or without a prefix or suffix (`DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`, `NPM_TOKEN=`).
+  A value that is an environment reference (`process.env.X`, `$X`, `${X}`) is not flagged.
+  The same scan runs on every source string, and a rejected entry's ledger record drops any
+  source that tripped a check. A rejection names only the
+  pattern (`sk-...`, `ghp_...`, `password`, `credential_url` for `scheme://user:password@host`),
+  never any part of the matched value.
 - `update` requires the target to exist and its current sha256 to match what the planner
   read (read-before-write). `create` requires the name to be free.
 - Ownership (D2): `update` and `archive` only on skills whose frontmatter has
@@ -227,33 +240,220 @@ Runbooks and agents use the same path with `kind: runbook | agent`, written as
 `RUNBOOK.md` or `AGENT.md` next to a `SKILL.md`-style frontmatter. A client without a
 native agent format gets them as skills.
 
+### 9.1 Promoter lint as the sole writer
+
+`applyEdits` in `src/apply/writer.ts` is the only code path that creates or changes a
+skill file. Every edit passes `validateEdit` first, and every `create` or `update` also
+passes `lintRendered` on the final rendered file just before the atomic write: frontmatter
+parses, `name` and `description` are present, a new skill's name and description meet the
+limits above, the body stays under the line cap, the whole text has no secret, and neither
+the description nor the body has a placeholder (the description is checked on `update`
+too). The description is written so that parsing the file returns exactly the string that
+was measured: double-quoted values are JSON-escaped and `parseFrontmatter` unescapes them.
+Sources are written as JSON-quoted list items and read back by a parser that looks only
+inside the frontmatter block, so body bullets are never taken for sources. A lint failure
+after rendering is recorded as `rejected` with an error that starts with `lint:`; nothing is
+written. Rejections, pinned-skill archive refusals and failures all append a ledger entry
+through `Store`, so no write attempt leaves no trace. An archive edit against a pinned skill
+is rejected by the writer itself, not only by `curate`. That check runs right before the
+archive, after the backup, and it fails closed: if `.usage.json` exists but cannot be parsed,
+the archive is refused. `curate` reports such a skill with its own verdict, `unreadable`,
+never archives it and does not rewrite the sidecar. `pin`, `unpin` and `touch` use the same
+strict reader: `pin` and `unpin` exit non-zero with a message, `touch` skips the write.
+The archive hashes `SKILL.md` before it moves the directory. If a step after the move
+fails, the writer renames the directory back and records a `failed` entry; if the rename
+back also fails, the skill really is archived, so it records an `applied` entry with
+`archivedTo` and a note, and `skillmine undo --run <id>` restores it. Removing a fanout
+symlink fails loudly on anything other than a missing path. An archive of a human-authored
+skill (with `--allow-human-edits`) records the owner as `human`. `update` keeps the newest
+20 sources. Temp files from a failed atomic write are removed. An `update` is refused with
+`frontmatter not flat` (recorded as `rejected`, nothing rewritten) when the existing
+frontmatter is anything other than plain `key: value` lines plus the `sources` list: block
+scalars, nested maps, other lists and comments all count. `add_reference` refuses to replace
+an existing references file unless its content already equals the new text or the ledger
+shows an applied skillmine write whose `after` hash is the file's current content, so a file
+a human wrote or edited afterwards is never overwritten. `update` records the owner as
+`human` for a human skill edited with `--allow-human-edits`. `skillmine undo` of an archive
+also recreates the fanout symlinks recorded in the entry. Backups run `tar -czh ... --`, so a
+symlinked skill is archived as its contents and a folder name that looks like an option is
+safe, and `tar`'s stderr is read while waiting for it to exit.
+
+Filesystem rules in the writer: `create` refuses when `<root>/<name>/SKILL.md` already exists
+on disk, whether or not the catalog knows it, and records `rejected`. If writing the file or
+making its links fails, the file, the links already made and a directory the call created are
+removed, so the `failed` entry is true. Archiving a local skill removes its project link
+(`fanoutFor(layout, scope, project)`); relative link targets are resolved against the link's
+own directory; if removing links fails midway, the links already removed are put back when
+the directory is moved back. The archive stores the `before` blob it records. A pre-run
+backup is made once per backed-up root and run, never overwritten by a later edit of the same
+run. The root is the skills directory the skill was discovered in (the catalog root, the
+parent of the discovered skill folder), never the parent of the real path, so a symlinked
+skill does not pull its real parent directory into the archive; when the discovered folder
+is itself a symlink, `tar -h` follows it so its contents are archived. A backup writes a `.ok` marker
+after `tar` succeeds. `tar` exit code 1 (a warning such as a file that changed while it was read, or a broken link)
+is accepted when the archive file exists and is not empty, and the marker is written; exit
+code 2 or higher fails. (`SKILLMINE_TAR` names another `tar` binary, which the tests use.) A
+failing `tar` deletes the partial archive, and an existing archive
+without its marker is rebuilt instead of reused. Blobs for `before` and `after` are stored
+before the file is changed. If appending the ledger entry fails, it is retried once; if it
+still fails the change is reported as applied with its real path, hashes and a note, so it
+is not lost. A fanout link matches the skill folder when their real paths agree, so a
+symlinked skills root still matches. Names in rejected entries and error text are stripped of
+control characters, capped at 80 characters and scanned for secrets (`[redacted]`).
+Before the first edit of a run, every backup that the valid edits need is taken; if one fails,
+the whole run is aborted before any edit, and each edit gets a `failed` ledger entry carrying
+the backup error. A `create` is undone only if the skill folder holds nothing but `SKILL.md`,
+`.usage.*` files and `references/` files that the ledger shows skillmine wrote (applied
+`add_reference` entries for that skill, not rolled back) and whose current content hash still
+equals the `after` hash of that entry; a file a human changed afterwards blocks the undo. The
+check runs before any link is removed, and a recorded fanout link is only unlinked if it still
+points at the skill folder (the same real-path test the archive uses).
+An archive edit may carry the skill's `path` (its realpath). `applyEdits` then resolves the
+target by that path, so a human skill that shares the name is never touched, and rejects the
+edit with "no skill at the given path" when nothing matches; without a path it falls back to
+the name. `curate` always sends the path. When the archive folder `.archive/<name>` already
+exists, the skill goes to `.archive/<name>-<timestamp>`; the writer's catalog drops an archived
+skill, so a later edit in the same run can create a skill with that name again. The edit's `reason` gets the same secret scan as sources, and a reason that tripped it is
+left out of the ledger.
+Undo is the only other code that touches skill files, and it restores ledger blobs rather
+than authoring content.
+
+Per-skill counters live in the existing `.usage.json` sidecar. Two fields were added next
+to `use_count`: `offered_count` (times the skill was shown in a session-start index) and
+`reject_count` (only rejections about the skill's content: a content check in `validateEdit`
+such as secrets, placeholders or size, and the rendered lint). Pinned and unreadable-sidecar
+archive refusals are policy and are not counted, nor are name collisions on `create`, bad
+sources, ownership refusals, sha conflicts or I/O failures. A third field, `last_offered_at`,
+records the latest offer. Counters are only read and written through a strict reader that
+treats wrong field types (including non-numeric `scanned_until` values) as unreadable, a
+failed write removes its temp file, every read-modify-write (`use`, `offered`, `reject`,
+`patch`, `pin` and the `curate` write) runs inside a `.usage.lock` file created with the
+exclusive `wx` flag next to the sidecar, holding the owner's pid, a timestamp and a unique
+token. A waiter
+backs off briefly and gives up after about two seconds with a lock-timeout error (the
+deadline is checked on every pass, so the loop cannot spin). A lock is stale when its pid is
+dead, when it carries no pid and is older than ten seconds, or when its pid is alive but it
+is older than sixty seconds. Breaking it re-reads the file and renames it to a unique
+temporary `.stale` name, so only one process wins the rename; the winner re-reads the renamed
+file, deletes it when it still holds the content judged stale, and otherwise links it back to
+the lock path and reports no takeover, and then the caller tries a fresh `wx` create. A
+process that loses the rename sees the lock gone and retries. The holder removes
+the lock only if the token in the file is still its own. `curate` re-reads the sidecar inside
+the lock and applies only its own changes. A corrupt sidecar is never overwritten, and an
+update never un-pins a skill by replacing it.
+
 ## 10. Undo and curate
 
 - `skillmine undo --last | <edit-id> | --run <run-id>`: restores `before` blobs, deletes
   `create` results, records the reversal as a new ledger entry with `rollback_of`. Fails
   closed if the current file no longer matches `after`.
 - Usage sidecar `.usage.json` per skill: `use_count`, `last_used_at`, `patch_count`,
-  `pinned`. The mod increments it from the `skill.prompt` event in Claude Code; batch runs
-  increment it by scanning transcripts of the other clients for skill invocations.
+  `pinned`. The mod stamps `last_used_at` from the `skill.prompt` event in Claude Code; `use_count`
+  comes only from scanning the transcripts of every client for skill invocations.
 - `skillmine curate`: skills with no use for 14 days become `stale`, 30 days `archived`
   (moved to `.archive/`, never deleted). Pinned and human-authored skills are exempt.
+  A run with `--project` only sees that project's sessions, so it is report only: it records
+  no uses, does not advance the `scanned_until` watermark, writes no status and archives
+  nothing; its report says so, and `--json` carries `readOnly`. Only an unscoped run records
+  uses and moves the watermark, because only it has scanned every session. The background
+  reflection therefore runs `curate` without `--project` (it still mines the one project).
+  Inside the locked update the verdict is recomputed from the sidecar as just re-read, and a
+  skill whose locked update failed is never archived: a timed-out lock is reported `locked`,
+  and any other failure (a permission error, a sidecar that cannot be parsed or has wrong
+  field types) is reported `unreadable` with the error message.
+  Scanned uses are matched to a skill by realpath when the use carries a path (a read of
+  any `.../<folder>/SKILL.md`, whatever the folder or the frontmatter name is, with `~`, `$HOME` and `${HOME}` expanded and the rest resolved
+  through symlinks and against the session's project). If that path matches no discovered
+  skill at all (an old checkout, a moved folder), the use falls back to the name and counts
+  when exactly one skillmine-authored skill has that name; a path that matches another
+  discovered skill (a human twin) never counts for the mined one. A use that carries only a
+  name (the `Skill` tool, a `/name` prompt) counts only when exactly one skillmine-authored
+  skill has that name.
+  The watermark is kept per client in `scanned_until`, keyed by client id (`codex`, `kimi`,
+  and so on). A key advances to the newest turn timestamp scanned for that client, only for a
+  client whose scan finished without a discover or read error, and never moves backwards.
+  Kimi, antigravity and opencode do not give every turn its own reliable timestamp (kimi and
+  antigravity stamp all turns of a session with the session file's modification time, opencode
+  stamps a turn with its latest tool part), so for them a timestamp alone would recount a
+  growing session. Their uses are also tracked per session in `scanned_uses`, keyed by client
+  id and then session id, holding how many uses of the skill were already counted in that
+  session. Only the uses past that number are counted and added, so a use is never counted
+  twice and `last_used_at` does not jump when the file changes. When the session list shrinks
+  (Kimi compaction or clear, OpenCode undo), the number is reset to the new length and counting
+  continues from there, and a session that was scanned but no longer holds any use of the skill
+  is reset to 0. A reader that exposes a stable turn id (`turnId`, which only OpenCode does:
+  Kimi has none and Antigravity step indexes are reused after a truncation) also gets
+  `scanned_turns`, keyed by client id and session id, holding the ids of the turns whose use
+  was counted; a use is then new exactly when its turn id is not in that list, so an undo
+  followed by new uses is counted correctly. Turns stamped more than 60 seconds after the
+  curate run's clock are ignored: they count no use and do not advance `scanned_until`. A session without an entry yet
+  counts only the uses stamped after the client's `scanned_until` value, which keeps the
+  legacy watermark working. A legacy single `batch` value is used
+  as the starting point for every client key and then dropped. The scan skips sessions that
+  belong to the tool's own helpers (the same check `mine` uses). The scan covers
+  every client, Claude included, and is the only thing that raises `use_count`. The mod's
+  `skillmine touch` (run on `skill.prompt`) only stamps `last_used_at`, so a use is never
+  counted twice, and a Read of any `.../<name>/SKILL.md` path counts as a use, which is how a
+  skill found through the session index gets used. A client whose scan had an error
+  contributes no uses that run and its watermark stays put, so a partial scan cannot re-count
+  the same uses later; the report names the clients that failed (`scanErrors` in `--json`).
+  If a use or a `last_used_at` stamp lands between curate's first read of a sidecar and its
+  locked update, an `archive` verdict for that skill is dropped for this run, and the usage is
+  checked once more right before the archive edit is built, after the lock is released. A
+  failed client scan disables archiving for the whole run, and so does a run in which any
+  client has no reader (for example `curate --clients claude`, or no readers at all): the
+  verdicts are still reported, but no archive edit is applied, and the report and `--json`
+  (`archiveDisabled`) say why (`scan incomplete for ...` or `no scan for ...`).
+  The per-client watermark is the newest turn timestamp actually scanned for that client, not
+  the wall-clock time, so a turn written while the scan ran is not skipped next time.
+  Sidecars that cannot be read for any reason other than a lock timeout, including a failure
+  in the final re-check before the archive edit, are `unreadable`, with the error message in
+  the report; only a lock timeout is `locked`. Human-authored skills never receive scanned
+  uses, so a human skill that shares a name takes nothing from a mined one.
   Optional LLM consolidation proposes umbrella merges as ordinary `Edit`s through the
   same apply path.
+
+### 10.1 Opportunity-relative lifecycle
+
+Wall-clock idleness punishes a skill that was never given a chance to be used. When a skill
+has `offered_count > 0`, `curate` judges it by opportunities instead of days:
+
+- Below the maturity threshold (default 300 offers, `SKILLMINE_MATURITY` or
+  `curate --maturity`; a value that is not a positive integer falls back to the default) the verdict is `probation`. The skill is never marked stale or
+  archived by time while it is on probation. Probation only applies while `use_count` is zero:
+  a skill that has been used but has fewer offers than the threshold still ages out by idle
+  time (`stale` after 14 days, `archive` after 30), so a used skill that went quiet is not
+  kept forever.
+- At or above the threshold, a skill with `use_count` of zero gets the `archive` verdict.
+  A skill with uses falls back to the idle-day verdicts above.
+- A skill on probation with zero uses that has not been offered for `SKILLMINE_PROBATION_MAX_DAYS`
+  days (default 180, or `curate --probation-max-days`; measured from `last_offered_at`, or from
+  creation when there is none) gets the `archive` verdict, so a skill that is never shown
+  cannot stay on probation forever.
+- A skill with no offer data (`offered_count` of zero) keeps the old time-based verdicts.
+- Pinned and human-authored skills stay exempt. Archiving is the ordinary `archive` edit:
+  the skill moves to `.archive/`, the ledger records it and `skillmine undo --run` restores
+  it. Nothing is deleted.
 
 ## 11. CLI
 
 ```
-skillmine mine [--days 30] [--clients all|claude,codex,...] [--project <path>] [--dry] [--classifier jev|laya|haiku] [--planner claude|codex|agy|kimi|opencode]
+skillmine mine [--days 30 | --since <ms|iso>] [--clients all|claude,codex,...] [--project <path>] [--dry] [--classifier jev|laya|haiku] [--planner claude|codex|agy|kimi|opencode]
 skillmine apply --edits <file|->          # used by the mod
 skillmine classify --window <file|->      # one window, prints Verdict
 skillmine undo --last | <id> | --run <id>
 skillmine ledger [--run <id>] [--limit 50]
-skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients ...]   # usage scan + stale/archive
+skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--maturity 300] [--probation-max-days 180] [--clients ...]   # usage scan + stale/archive
 skillmine pin <skill> | unpin <skill>     # exempt a mined skill from decay
-skillmine touch <skill>                   # record one use; the mod calls it on skill.prompt
+skillmine touch <skill>                   # stamp last_used_at only; the mod calls it on skill.prompt
 skillmine install-skill [--from <dir>]    # link clients/skillmine into Codex, Kimi, OpenCode, Antigravity skill dirs
 skillmine gate --client <c> --session <id> [--project <p>] [--every 3] [--cooldown 20] [--force]
                                           # live gate for clients without a mod API, spawned detached by a Stop hook
+skillmine tick --session <id> --calls <n> [--project <p>] [--every 50]
+                                          # count tool calls; every Nth spawns `skillmine reflect` detached
+skillmine reflect [--project <p>]         # background reflection: mine since the last reflection, then curate
+skillmine index [--project <p>] [--session <id>] [--json]   # compact index of self-authored skills; with --session also prints a `#offered [paths]` line
+skillmine offered --session <id> --paths <file|-> [--project <p>]   # mark the session injected and count the offers once the index reached it
 skillmine doctor                          # readers found, classifier reachable, targets writable
 ```
 
@@ -261,6 +461,135 @@ skillmine doctor                          # readers found, classifier reachable,
 `~/.skillmine/gate/` and a lock per session. Only every Nth stop reaches the classifier;
 rejected turns are consumed, turns blocked by the cooldown are kept for the next gate.
 It is the same pipeline as the mod's live check, run as a subprocess.
+
+`SKILLMINE_PLANNER_CWD` and `SKILLMINE_HAIKU_CWD` count as unset when empty.
+`SKILLMINE_HOME` names the state directory (default `~/.skillmine`); an empty value counts as
+unset and a relative value resolves against the home directory, in the store and in the
+helper-session check alike. `skillmine undo` of a created skill ignores `.usage.json` and
+`.usage.lock` (and their temp files) when it checks for files it did not write, and removes
+them with the folder. In the mod, a `mine` that exits 3 (some classifier or planner calls
+failed) counts as a success when its output parses: the applied lessons are shown and the
+toast adds the number of failed calls.
+
+### 11.1 Tool-call reflection trigger
+
+`tick` keeps one counter file per session under `~/.skillmine/counters/` (written through a
+temp file and a rename; fields that are not finite non-negative numbers are reset to 0).
+Each call adds the tool calls made since the last tick. When the count reaches N (default
+50, `SKILLMINE_REFLECT_EVERY_N`) it takes the reflection lock and spawns `skillmine reflect`
+detached with `SKILLMINE_REFLECTING=1`. After a trigger, and also after finding the lock
+held, the session count restarts from zero, so that session needs N further calls before
+it tries again (a cooldown). A failed launch keeps the count.
+
+The lock is a directory, `~/.skillmine/reflect.lock/`, created with `mkdir` (atomic, no
+create-then-write gap). `owner.json` inside holds a random token, a pid and a timestamp
+`ts`. The token reaches the child in `SKILLMINE_REFLECT_LOCK_TOKEN`; only a process whose
+token matches releases it, and release re-reads `owner.json` right before removing the
+directory and aborts if the token changed. After the spawn the tick records the child's pid
+in `owner.json`; the child writes its own pid when it starts and refreshes `ts` every five
+minutes from an unref'd timer. When a refresh finds that the token changed, the reflection
+marks the lock as lost; `reflect` checks that after `mine` and again after `curate`, skips
+`curate` when it is lost, prints "lock lost" and exits non-zero, without releasing a lock it
+no longer owns. `reflect` awaits any
+in-flight refresh before it releases the lock.
+
+A lock is stale when any of these holds: `ts` lies in the future beyond a 60 second skew; the
+recorded pid is not alive (`process.kill(pid, 0)` fails with `ESRCH`); no pid is recorded and
+`ts` is more than 30 minutes old. A lock whose pid is alive is not stale until its
+`ts` is three windows (90 minutes) old, which covers a long reflection whose refresh has been
+delayed. A lock with no readable `ts` (empty or corrupt `owner.json`, or a legacy lock
+file) is judged by the mtime of the lock path, so it counts as fresh until it ages. Takeover
+first re-reads `owner.json` and gives up if it no longer matches what was judged stale, then
+renames the stale directory to a unique name, which only one contender can win; the loser
+gets `ENOENT` and does not acquire. The winner checks that the moved `owner.json` is the
+content it judged stale. If it is not, the directory held a live lock that was claimed in the
+meantime: the winner renames it back to `reflect.lock`, and when `reflect.lock` exists again
+it deletes the moved directory instead; either way the lock counts as not acquired. If it
+matches, the winner deletes the `.stale-` directory and makes its own with `mkdir`; losing
+that race also means not acquired. Release reads the token, renames the directory to a
+private `reflect.lock.release-<uuid>`, re-reads the token inside it and only then deletes it;
+on a mismatch it renames the directory back. After creating its directory a contender
+re-reads `owner.json` and treats a different token as not acquired, and `updateLockOwner`
+writes a temp file inside the lock, re-reads the token and only then renames the temp file
+over `owner.json`. A tiny window remains between that last token check and the rename, in
+which a lock stolen at that instant can receive the old owner's `owner.json`.
+
+This is a best-effort lock, not strict mutual exclusion. A small window remains between
+reading a token and acting on it, in which a stale-judged lock can be replaced; the pid and
+timestamp checks, the token on every write and the lost-lock abort limit the damage, and a
+reflection is idempotent (it mines a window and applies validated, ledgered edits), so the
+worst case is a duplicated reflection, not corrupted state.
+
+`tick` waits for the child's `spawn` or `error` event: on error it releases the lock and
+reports `failed`. A manual `skillmine reflect` without `SKILLMINE_REFLECTING` takes the lock
+itself (and exits without running if it is held), marks its own process as a reflection and
+releases only its own token. With `SKILLMINE_REFLECTING` set, `reflect` runs only when it
+carries a lock token that matches the lock; otherwise it exits 0 with a "nested" message and
+runs neither `mine` nor `curate`, which matters because planner subprocesses inherit the
+guard. The token variable is removed from the process environment at start so that
+grandchildren cannot reuse it. Helper sessions (the planner and classifier run in the state dir, and their subprocesses
+carry `SKILLMINE_INDEX_SUSPENDED=1`) are never counted: `tick`, `index` and `offered` return
+early when the project is under the state dir. `reflect` stores the start time of its last successful
+mine in `~/.skillmine/reflect.json`, one record per project (keyed by a hash of the resolved
+project path, with its own key when no project is given), and mines only windows since then (`mine --since`, at most
+seven days back; the first run uses `--days 1`), then runs an unscoped `curate`, and exits
+non-zero when either fails. The record advances when `mine` exits 0 or 3: `mine` exits 1 when
+nothing succeeded (every classifier call failed, or every planner call failed and nothing was
+applied; no advance) and 3 when only some calls failed (partial success); the failed cluster
+ids and the counts (classifier errors, planner errors, applied, rejected) are written to
+stderr, which for the detached child is `reflect.log`, and a window is never re-mined because of a partial failure. `--since` takes an ISO date or
+epoch milliseconds of at least 13 digits; anything else exits 2. The project is resolved to an
+absolute path in `tick` and `reflect`. Sessions of the tool's own helpers are left out of
+every mine: the planner and the haiku classifier run with their working directory inside the
+skillmine state dir (`~/.skillmine/empty`, or `SKILLMINE_PLANNER_CWD` and
+`SKILLMINE_HAIKU_CWD`), and `mine` skips any session whose project lies under those
+directories or the state dir, for every client. `tick --every` must be a positive integer, or
+the command exits 2; `tick` exits 1 when the launch failed, so the mod logs it. A global cooldown
+(`SKILLMINE_REFLECT_COOLDOWN_MS`, default 15 minutes, 0 turns it off) is checked before the
+lock: a tick inside it resets the session counter and reports `cooldown`. The time of the last
+launch is kept in `~/.skillmine/reflect-trigger.json`. The detached child's stdout and stderr
+are appended to `~/.skillmine/reflect.log`. Each tick deletes counter and marker files older
+than seven days and cuts `reflect.log` to its last 1 MB once it exceeds 2 MB, truncating the same file in place so
+that a running child's append handle keeps writing to it (best effort).
+The session marker is created by `offered`, which the mod calls only after the append
+succeeded, so a failed append leaves the session unmarked and the next start offers the index
+again; `offered` also uses a second marker (`<session>.offered`) so the counters rise once. The relaunch command is the current executable plus the
+real path of the entry script (`Bun.main`), or the executable alone for a compiled binary.
+With the guard set, `tick` and `index` do nothing, so a reflection never triggers another.
+The Claude Code mod chains its tick calls so that overlapping runs cannot apply out of
+order, and calls `tick` after each completed main-agent turn with the number of tool uses
+found in the new session rows.
+
+### 11.2 Session-start index
+
+`index` trusts a skill only when the ledger holds an applied `create` for its path
+(compared by realpath) that was not rolled back; a rolled-back create stops counting, but a
+later applied create at the same path restores trust. The `created_by: skillmine`
+frontmatter marker is an additional filter and never enough alone, because a cloned
+repository can ship that line. A human skill that shares a name or carries the marker at a
+different path is never indexed or written to. Skills are ranked by `use_count` and printed
+one line each: `- name: description (/path/to/SKILL.md)`, so the model can open the file, with the name cut to 64 characters and the description
+to 60, control characters and newlines replaced by spaces. The whole block, header
+included, is capped at 2000 characters and 40 entries; skills that do not fit are neither
+shown nor counted. With `--session`, `index` prints the block followed by a line
+`#offered ["path", ...]` and writes nothing; it prints nothing when
+`counters/<session>.injected` already exists, so a resumed session is not injected twice. The
+mod appends the block (without the `#offered`
+line) to the session and only after the append succeeds calls
+`offered --session <id> --paths -` with the list on stdin. `offered` claims
+`counters/<session>.injected` with the exclusive `wx` flag (a file separate from the tick
+counter, so the two never write the same file) and does nothing when it already exists, then
+re-checks each path against the same trust rule, then claims a second marker, `counters/<session>.offered`, with
+`wx`, and adds one to `offered_count` and sets `last_offered_at` for each skill that was
+shown, so the counters rise at most once per session; an append that failed counts nothing.
+The counter is the denominator for 10.1. It is not written when the skill folder no longer
+exists, and the sidecar writer no longer creates missing folders.
+`SKILLMINE_INDEX_SUSPENDED=1` prints nothing and counts nothing. The mod schedules the call
+after `session.start` returns, off the critical path, and logs stderr when `tick`, `index`
+or `offered` exit non-zero. If the session has fewer rows than were counted (for example after
+a compaction), the tool-call row counter moves to the new length and counts only the tool
+uses after the last user row; the mod does nothing while the session id is empty. If the rows could not be read at session start, it is set on the first
+successful read, again without counting that history.
 
 ### Adapter layout (per client)
 
@@ -273,13 +602,18 @@ It is the same pipeline as the mod's live check, run as a subprocess.
 The CLI is the only engine. Adapters never contain pipeline logic.
 
 Usage lives in `.usage.json` beside each mined `SKILL.md`: `use_count`, `last_used_at`,
-`patch_count`, `pinned`, `first_seen_at`, `status`, `scanned_until`. The mod records a
-use on every `skill.prompt` event through `skillmine touch`; `curate` scans the other
-clients' transcripts for `Skill`-style tool calls, reads of `skills/<name>/SKILL.md` and
-`/<name>` prompts, and only counts stamps newer than the previous scan. Patches by
+`patch_count`, `pinned`, `first_seen_at`, `status`, `scanned_until`, `offered_count`,
+`reject_count`, `last_offered_at`. The mod stamps
+`last_used_at` on every `skill.prompt` event through `skillmine touch`; `curate` scans every
+client's transcripts for `Skill`-style tool calls, reads of `.../<name>/SKILL.md` and
+`/<name>` prompts, and only counts stamps newer than that client's previous scan. Patches by
 Skillmine raise `patch_count`, never `use_count`. Idleness is measured from the latest of
 `last_used_at`, the ledger `create` time and `first_seen_at`; an archive is an ordinary
 `archive` edit through `applyEdits`, so it is validated, snapshotted, logged and undoable.
+
+The index the mod appends to a session starts with the marker `[skillmine-index]`, and the
+readers returned by `createReaders` drop user rows that begin with it, as does the mod's own
+digest, so the index is never mined or classified as a conversation.
 
 `mine --dry` prints sessions scanned, windows kept per signal, clusters with sample
 digests and the catalog matches. No planner call. Always the first run on a new machine.

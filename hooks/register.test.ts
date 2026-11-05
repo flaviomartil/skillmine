@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Lesson } from '../types'
-import { digestRows, rowText, verb } from './register'
+import { callsSince, countToolCalls, digestRows, rowText, verb } from './register'
 
 const lesson: Lesson = {
   id: 'e_abc123',
@@ -37,5 +37,34 @@ describe('skillmine rows', () => {
     const full = digestRows(rows)
     expect(full).toContain('user: no, the lock is in redis')
     expect(full).toContain('[tools: Bash(pnpm test) FAILED]')
+  })
+
+  test('countToolCalls sums tool uses across rows', async () => {
+    const use = (id: string) => ({ tool_use_id: id, tool: 'Bash', input: { command: 'ls' } })
+    const rows = [
+      { role: 'user' as const, text: 'hi', toolUses: [] },
+      { role: 'assistant' as const, text: '', toolUses: [use('a'), use('b')] },
+      { role: 'assistant' as const, text: '', toolUses: [use('c')] },
+    ]
+    expect(countToolCalls(rows)).toBe(3)
+    expect(countToolCalls(rows.slice(2))).toBe(1)
+    expect(countToolCalls([])).toBe(0)
+  })
+
+  test('callsSince counts new rows and, after a compaction, only the latest turn', async () => {
+    const use = (id: string) => ({ tool_use_id: id, tool: 'Bash', input: { command: 'ls' } })
+    const rows = [
+      { role: 'user' as const, text: 'old', toolUses: [] },
+      { role: 'assistant' as const, text: '', toolUses: [use('a'), use('b')] },
+      { role: 'user' as const, text: 'summary', toolUses: [] },
+      { role: 'assistant' as const, text: '', toolUses: [use('c')] },
+      { role: 'assistant' as const, text: '', toolUses: [use('d')] },
+    ]
+    expect(callsSince(rows, 5)).toBe(0)
+    expect(callsSince(rows, 3)).toBe(2)
+    expect(callsSince(rows, 9)).toBe(2)
+    expect(callsSince(rows, -1)).toBe(0)
+    expect(callsSince(rows, Number.NaN)).toBe(0)
+    expect(callsSince([], 3)).toBe(0)
   })
 })

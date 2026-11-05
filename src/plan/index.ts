@@ -2,7 +2,7 @@ import type { Planner, PlannerBackend } from './types.ts'
 import { CommandPlanner, preset, PROMPT } from './command.ts'
 
 export type { Planner, PlannerBackend, PlanInput, PlanOutput, Edit, CreateEdit, UpdateEdit, AddReferenceEdit, ArchiveEdit, TargetSkill, Scope, ArtifactKind } from './types.ts'
-export { plannerPrompt, parsePlanOutput, PLANNER_RULES } from './prompt.ts'
+export { plannerPrompt, parsePlanOutput, plannerRules } from './prompt.ts'
 export { CommandPlanner, preset, PROMPT } from './command.ts'
 
 export function parsePlannerBackend(spec: string | undefined, fallback: PlannerBackend = 'claude'): PlannerBackend {

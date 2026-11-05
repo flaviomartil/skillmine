@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
 import { mkdtemp, mkdir, writeFile, readFile, rm, lstat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Turn, Reader, SessionRef } from '../src/types.ts'
+import { CLIENTS, type Client, type Turn, type Reader, type SessionRef } from '../src/types.ts'
 import { skillUsesIn, scanUsage, readUsage, recordUse, writeUsage, emptyUsage } from '../src/curate/usage.ts'
 import { curate, verdictFor, DAY } from '../src/curate/index.ts'
 import { Store } from '../src/apply/store.ts'
@@ -16,6 +16,8 @@ function turn(role: 'user' | 'assistant', text: string, extra: Partial<Turn> = {
 }
 
 const names = new Set(['redis-locks', 'gh-accounts'])
+
+const noReaders = Object.fromEntries(CLIENTS.map((c) => [c, { client: c, discover: async () => [], read: async () => [] }])) as unknown as Record<Client, Reader>
 
 describe('skillUsesIn', () => {
   test('Skill tool call by name', () => {
@@ -94,7 +96,7 @@ describe('curate', () => {
 
   test('archives idle mined skills through the ledger and undo restores them', async () => {
     await seed('old-unused', 'skillmine', 45)
-    const res = await curate({ store, home, now, layout: defaultLayout(home) })
+    const res = await curate({ store, home, readers: noReaders, now, layout: defaultLayout(home) })
     expect(res.archived.map((a) => a.name)).toEqual(['old-unused'])
     await lstat(join(home, '.agents', 'skills', '.archive', 'old-unused', 'SKILL.md'))
     await expect(lstat(join(home, '.agents', 'skills', 'old-unused'))).rejects.toThrow()

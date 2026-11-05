@@ -5,6 +5,7 @@ import type { Lesson, LessonAction } from '../types'
 import { plannerPrompt, parsePlanOutput } from '../src/plan/prompt.ts'
 import type { Edit, PlanInput } from '../src/plan/types.ts'
 import { cut, firstStringArg } from '../src/util/text.ts'
+import { isInjectedIndex } from '../src/util/internal.ts'
 
 const GATE_CHARS = 6000
 const MARK = /\[skillmine:([a-z0-9_]+)\]/
@@ -21,6 +22,8 @@ type ApplyResult = { applied: LedgerEntry[]; rejected: LedgerEntry[] }
 const config = { cliArgv: ['skillmine'], classifier: 'jev', every: 3, cooldownMs: 20 * 60_000 }
 let turns = 0
 let gatedRows = 0
+let countedRows = 0
+let countChain: Promise<void> = Promise.resolve()
 let lastPlanned = 0
 let cwd = ''
 let sessionId = ''
@@ -28,6 +31,7 @@ let sessionId = ''
 export function digestRows(rows: readonly SessionMessage[], max = GATE_CHARS): string {
   const lines: string[] = []
   for (const r of rows) {
+    if (isInjectedIndex(r.role, r.text ?? '')) continue
     const text = cut(r.text ?? '', 1200)
     const tools = r.toolUses.length ? ` [tools: ${r.toolUses.map((t) => `${t.tool}(${firstStringArg(t.input)})${t.isError ? ' FAILED' : ''}`).join(', ')}]` : ''
     if (!text && !tools) continue
@@ -36,6 +40,12 @@ export function digestRows(rows: readonly SessionMessage[], max = GATE_CHARS): s
   let out = lines.join('\n')
   if (out.length > max) out = out.slice(out.length - max)
   return out
+}
+
+export function countToolCalls(rows: readonly SessionMessage[]): number {
+  let n = 0
+  for (const r of rows) n += r.toolUses.length
+  return n
 }
 
 export function verb(action: LessonAction): string {
@@ -141,6 +151,57 @@ async function check($: EngineInterface): Promise<void> {
   }
 }
 
+function logFailure($: EngineInterface, what: string, res: { exitCode: number; stderr: string }): void {
+  $.ui.log(`skillmine: ${what} exited ${res.exitCode}: ${res.stderr.slice(0, 300)}`, { to: 'debug' })
+}
+
+export function callsSince(rows: readonly SessionMessage[], counted: number): number {
+  if (!Number.isFinite(counted) || counted < 0 || rows.length === counted) return 0
+  if (rows.length > counted) return countToolCalls(rows.slice(counted))
+  let turnStart = rows.length - 1
+  while (turnStart >= 0 && rows[turnStart]!.role !== 'user') turnStart -= 1
+  return countToolCalls(rows.slice(turnStart + 1))
+}
+
+async function countCalls($: EngineInterface): Promise<void> {
+  if (!sessionId) return
+  try {
+    const rows = await $.session.messages()
+    const known = Number.isFinite(countedRows) && countedRows >= 0
+    const calls = known ? callsSince(rows, countedRows) : 0
+    countedRows = rows.length
+    if (calls <= 0) return
+    const res = await runCli($, ['tick', '--session', sessionId, '--calls', String(calls), '--project', cwd], undefined, 30_000)
+    if (res.exitCode !== 0) logFailure($, 'tick', res)
+  } catch (err) {
+    $.ui.log(`skillmine: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
+  }
+}
+
+function queueCount($: EngineInterface): void {
+  countChain = countChain.then(() => countCalls($)).catch(() => undefined)
+}
+
+const OFFERED_PREFIX = '#offered '
+
+async function injectIndex($: EngineInterface): Promise<void> {
+  if (!sessionId) return
+  try {
+    const res = await runCli($, ['index', '--project', cwd, '--session', sessionId], undefined, 30_000)
+    if (res.exitCode !== 0) return logFailure($, 'index', res)
+    const lines = res.stdout.split('\n')
+    const at = lines.findIndex((l) => l.startsWith(OFFERED_PREFIX))
+    const paths = at >= 0 ? lines[at]!.slice(OFFERED_PREFIX.length) : '[]'
+    const text = lines.filter((_, i) => i !== at).join('\n').trim()
+    if (!text) return
+    await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+    const offered = await runCli($, ['offered', '--session', sessionId, '--paths', '-', '--project', cwd], paths, 30_000)
+    if (offered.exitCode !== 0) logFailure($, 'offered', offered)
+  } catch (err) {
+    $.ui.log(`skillmine: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
+  }
+}
+
 async function mineDays($: EngineInterface, days: number): Promise<void> {
   await update($, busy, () => 'mining')
   $.ui.status(`🧠 mining the last ${days} day(s)…`)
@@ -154,13 +215,14 @@ async function mineDays($: EngineInterface, days: number): Promise<void> {
       else stderr += chunk.text
     }
     const result = await stream.result
-    if (result.code !== 0) throw new Error(stderr.slice(-400) || `mine exited ${result.code}`)
-    const summary = JSON.parse(stdout) as { run?: { id: string; applied: number; rejected: number; clusters: number } }
+    if (result.code !== 0 && result.code !== 3) throw new Error(stderr.slice(-400) || `mine exited ${result.code}`)
+    const summary = JSON.parse(stdout) as { analysis?: { errors?: number }; run?: { id: string; applied: number; rejected: number; clusters: number; errors?: number } }
     if (!summary.run) return
     const led = await runCli($, ['ledger', '--run', summary.run.id, '--json'])
     const entries = (JSON.parse(led.stdout) as LedgerEntry[]).filter((e) => e.status === 'applied')
     for (const e of entries) await remember($, await lessonFrom($, e, e.reason, undefined, 'mine'))
-    $.ui.toast(`🧠 mined ${days} day(s): ${summary.run.clusters} clusters planned, ${entries.length} ${entries.length === 1 ? 'lesson' : 'lessons'} written${summary.run.rejected ? `, ${summary.run.rejected} rejected` : ''}`)
+    const errors = (summary.analysis?.errors ?? 0) + (summary.run.errors ?? 0)
+    $.ui.toast(`🧠 mined ${days} day(s): ${summary.run.clusters} clusters planned, ${entries.length} ${entries.length === 1 ? 'lesson' : 'lessons'} written${summary.run.rejected ? `, ${summary.run.rejected} rejected` : ''}${errors ? `, ${errors} failed calls` : ''}`)
   } catch (err) {
     $.ui.toast(`skillmine: mining failed: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
@@ -194,12 +256,20 @@ export const register: Register = (on, options) => {
     })
     const stored = await $.store.get('lessons')
     if (Array.isArray(stored)) await update($, lessons, () => (stored as Lesson[]).slice(-MAX_LESSONS))
+    countedRows = await $.session
+      .messages()
+      .then((rows) => rows.length)
+      .catch(() => -1)
+    $.clock.after(0, () => {
+      void injectIndex($)
+    })
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined || e.isAborted) return result
+    $.clock.after(0, () => queueCount($))
     turns += 1
     if (turns % config.every !== 0) return result
     if ((await read($, busy)) !== null) return result

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs } from 'node:util'
+import { resolve } from 'node:path'
 import { stat, readFile, writeFile } from 'node:fs/promises'
 import { createReaders, defaultPaths } from './readers/index.ts'
 import { mine, parseClients } from './mine.ts'
@@ -17,14 +18,16 @@ import { prepare } from './prepare.ts'
 import { curate } from './curate/index.ts'
 import { gate, logGate } from './gate.ts'
 import type { Client } from './types.ts'
-import { recordUse, setPinned } from './curate/usage.ts'
+import { recordTouch, setPinned } from './curate/usage.ts'
 import { discoverSkills } from './catalog.ts'
 import { installThinSkill, uninstallThinSkill } from './install.ts'
+import { tick, acquireReflectLock, releaseReflectLock, updateLockOwner, startLockRefresh, readLastReflect, writeLastReflect, resolveReflectProject, claimInjection, CHILD_ENV, LOCK_TOKEN_ENV } from './reflect.ts'
+import { buildIndex, recordOffers } from './index-inject.ts'
 
 const HELP = `skillmine — mine coding-agent sessions into skills
 
 usage:
-  skillmine mine [--days 30] [--clients all|claude,codex,kimi,opencode,agy] [--project <path>]
+  skillmine mine [--days 30 | --since <ms|iso>] [--clients all|claude,codex,kimi,opencode,agy] [--project <path>]
                  [--embed ollama|openai|none] [--embed-model <name>] [--sim 0.9]
                  [--classify jev|laya|haiku] [--max-calls 50]
                  [--planner claude|codex|agy|kimi|opencode] [--planner-model <name>] [--allow-human-edits]
@@ -34,10 +37,14 @@ usage:
   skillmine undo [--last | --id <edit-id> | --run <run-id>]
   skillmine ledger [--limit 30] [--run <run-id>]
   skillmine classify --digest <file|-> [--classify jev|laya|haiku] [--skill name=description ...]
-  skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--clients all|...] [--project <path>] [--json]
+  skillmine curate [--dry] [--stale-days 14] [--archive-days 30] [--maturity 300] [--probation-max-days 180] [--clients all|...] [--project <path>] [--json]
   skillmine pin <skill> | skillmine unpin <skill>
-  skillmine touch <skill>                   # record one use (the mod calls this)
+  skillmine touch <skill>                   # stamp last_used_at (the mod calls this; uses are counted by curate)
   skillmine install-skill [--from <dir>] [--remove]   # link the thin /skillmine skill into Codex, Kimi, OpenCode and Antigravity
+  skillmine tick --session <id> --calls <n> [--project <path>] [--every 50]   # count tool calls, spawn a background reflection every N
+  skillmine reflect [--project <path>]      # background reflection: mine since the last reflection, then curate
+  skillmine index [--project <path>] [--session <id>] [--json]   # compact index of self-authored skills; with --session also prints a #offered line
+  skillmine offered --session <id> --paths <file|-> [--project <path>]   # mark the session injected and count the offers once the index reached it
   skillmine doctor
 
 Without --dry, passed clusters go to the planner and its edits are applied with a ledger,
@@ -76,6 +83,14 @@ async function main(argv: string[]): Promise<number> {
       return installSkillCmd(rest)
     case 'gate':
       return gateCmd(rest)
+    case 'tick':
+      return tickCmd(rest)
+    case 'reflect':
+      return reflectCmd(rest)
+    case 'index':
+      return indexCmd(rest)
+    case 'offered':
+      return offeredCmd(rest)
   }
   console.error(`unknown command: ${cmd}\n\n${HELP}`)
   return 2
@@ -93,11 +108,14 @@ function progress(quiet: boolean) {
   }
 }
 
+const MINE_PARTIAL = 3
+
 async function mineCmd(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
       days: { type: 'string', default: '30' },
+      since: { type: 'string' },
       clients: { type: 'string', default: 'all' },
       project: { type: 'string' },
       dry: { type: 'boolean', default: false },
@@ -121,10 +139,18 @@ async function mineCmd(argv: string[]): Promise<number> {
     console.error('--days must be a positive number')
     return 2
   }
+  let since: number | undefined
+  if (values.since !== undefined) {
+    since = /^\d{13,}$/.test(values.since) ? Number(values.since) : /^\d+$/.test(values.since) ? Number.NaN : Date.parse(values.since)
+    if (!Number.isFinite(since) || since <= 0) {
+      console.error('--since must be an ISO date or epoch milliseconds (at least 13 digits)')
+      return 2
+    }
+  }
   const quiet = values.quiet || values.json
   const report = progress(quiet)
   const clients = parseClients(values.clients)
-  const result = await mine(createReaders(), { days, clients, project: values.project, onProgress: (d, t) => report('reading sessions', d, t) })
+  const result = await mine(createReaders(), { days, since, clients, project: values.project, onProgress: (d, t) => report('reading sessions', d, t) })
 
   let embed
   try {
@@ -178,7 +204,17 @@ async function mineCmd(argv: string[]): Promise<number> {
       console.log(runReport(run))
     }
   }
-  return analysis.errors.length && analysis.errors.length === analysis.stats.calls ? 1 : 0
+  if (analysis.errors.length && analysis.errors.length === analysis.stats.calls) return 1
+  const failedPlans = run?.planned.filter((p) => p.error).map((p) => p.cluster.id) ?? []
+  if (analysis.errors.length || failedPlans.length) {
+    const ids = [...analysis.errors.map((e) => e.cluster), ...failedPlans]
+    const t = run?.totals
+    console.error(`mine: classifier errors ${analysis.errors.length}/${analysis.stats.calls}, planner errors ${t?.errors ?? 0}/${t?.plannerCalls ?? 0}, applied ${t?.applied ?? 0}, rejected ${t?.rejected ?? 0}`)
+    console.error(`mine: ${ids.length} clusters failed and were not retried: ${ids.join(', ')}`)
+    if (t && t.errors > 0 && t.errors === t.plannerCalls && t.applied === 0) return 1
+    return MINE_PARTIAL
+  }
+  return 0
 }
 
 async function classifyCmd(argv: string[]): Promise<number> {
@@ -272,7 +308,7 @@ async function applyCmd(argv: string[]): Promise<number> {
     const i = pair.indexOf('=')
     if (i > 0) expectedSha.set(pair.slice(0, i), pair.slice(i + 1))
   }
-  const res = await applyEdits(edits, { store, project: values.project ?? '', expectedSha, allowHumanEdits: values['allow-human-edits'] })
+  const res = await applyEdits(edits, { store, project: values.project ?? '', expectedSha: expectedSha.size ? expectedSha : undefined, allowHumanEdits: values['allow-human-edits'] })
   if (values.json) console.log(JSON.stringify(res, null, 2))
   else {
     for (const a of res.applied) console.log(`applied   ${a.action.padEnd(13)} ${a.name}  ${a.path}  (${a.id})`)
@@ -314,6 +350,8 @@ async function curateCmd(argv: string[]): Promise<number> {
       dry: { type: 'boolean', default: false },
       'stale-days': { type: 'string', default: '14' },
       'archive-days': { type: 'string', default: '30' },
+      maturity: { type: 'string' },
+      'probation-max-days': { type: 'string' },
       clients: { type: 'string', default: 'all' },
       project: { type: 'string' },
       json: { type: 'boolean', default: false },
@@ -330,11 +368,13 @@ async function curateCmd(argv: string[]): Promise<number> {
     project: values.project,
     staleDays: Number(values['stale-days']) || 14,
     archiveDays: Number(values['archive-days']) || 30,
+    maturity: Number(values.maturity) || undefined,
+    probationMaxDays: Number(values['probation-max-days']) || undefined,
     dry: values.dry,
     onPhase: report,
   })
   if (values.json) {
-    console.log(JSON.stringify({ run: res.run, scanned: res.scanned, rows: res.rows.map((r) => ({ name: r.skill.name, path: r.skill.realpath, verdict: r.verdict, idleDays: r.idleDays, usage: r.usage })), archived: res.archived.map((a) => a.id), rejected: res.rejected.map((a) => a.error) }, null, 2))
+    console.log(JSON.stringify({ run: res.run, readOnly: res.readOnly, scanErrors: res.scanErrors, archiveDisabled: res.archiveDisabled, scanned: res.scanned, rows: res.rows.map((r) => ({ name: r.skill.name, path: r.skill.realpath, verdict: r.verdict, idleDays: r.idleDays, error: r.error, usage: r.usage })), archived: res.archived.map((a) => a.id), rejected: res.rejected.map((a) => a.error) }, null, 2))
   } else console.log(curateReport(res, values.dry))
   return 0
 }
@@ -397,6 +437,124 @@ async function gateCmd(argv: string[]): Promise<number> {
   return 0
 }
 
+async function tickCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      session: { type: 'string' },
+      calls: { type: 'string', default: '1' },
+      project: { type: 'string' },
+      every: { type: 'string' },
+      json: { type: 'boolean', default: false },
+    },
+    strict: true,
+  })
+  if (!values.session) {
+    console.error('--session is required')
+    return 2
+  }
+  let every: number | undefined
+  if (values.every !== undefined) {
+    every = Number(values.every)
+    if (!Number.isInteger(every) || every <= 0) {
+      console.error('--every must be a positive integer')
+      return 2
+    }
+  }
+  const res = await tick({ store: new Store(), session: values.session, calls: Number(values.calls) || 0, project: values.project ? resolve(values.project) : undefined, every })
+  console.log(values.json ? JSON.stringify(res) : `tick ${res.status} ${res.count}/${res.every}${res.reason ? ` (${res.reason})` : ''}`)
+  return res.status === 'failed' ? 1 : 0
+}
+
+async function reflectCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { project: { type: 'string' } }, strict: true })
+  const store = new Store()
+  let token = process.env[LOCK_TOKEN_ENV]
+  delete process.env[LOCK_TOKEN_ENV]
+  if (process.env[CHILD_ENV]) {
+    if (!token) {
+      console.error('nested reflection: skipped')
+      return 0
+    }
+    if (!(await updateLockOwner(store, token, { pid: process.pid, ts: Date.now() }))) {
+      console.error('nested reflection: lock token does not match; skipped')
+      return 0
+    }
+  } else {
+    token = await acquireReflectLock(store)
+    if (!token) {
+      console.error('another reflection is running')
+      return 0
+    }
+    process.env[CHILD_ENV] = '1'
+  }
+  const refresh = startLockRefresh(store, token)
+  try {
+    const startedAt = Date.now()
+    const target = resolveReflectProject(values.project)
+    const project = target ? ['--project', target] : []
+    const last = await readLastReflect(store, target)
+    const since = Math.max(last ?? 0, startedAt - 7 * 86_400_000)
+    const window = last ? ['--since', String(since)] : ['--days', '1']
+    const mined = await mineCmd([...window, '--quiet', ...project])
+    if (refresh.lost()) {
+      console.error('lock lost')
+      return 1
+    }
+    if (mined === 0 || mined === MINE_PARTIAL) await writeLastReflect(store, target, startedAt)
+    const curated = await curateCmd(['--quiet'])
+    if (refresh.lost()) {
+      console.error('lock lost')
+      return 1
+    }
+    return mined || curated
+  } finally {
+    await refresh.stop()
+    if (!refresh.lost()) await releaseReflectLock(store, token)
+  }
+}
+
+const OFFERED_PREFIX = '#offered '
+
+async function indexCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { project: { type: 'string' }, session: { type: 'string' }, json: { type: 'boolean', default: false } }, strict: true })
+  const store = new Store()
+  const res = await buildIndex({ store, project: values.project, session: values.session })
+  if (values.json) console.log(JSON.stringify(res))
+  else if (res.text) {
+    console.log(res.text)
+    if (values.session) console.log(OFFERED_PREFIX + JSON.stringify(res.paths))
+  }
+  return 0
+}
+
+async function offeredCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { session: { type: 'string' }, paths: { type: 'string' }, project: { type: 'string' } }, strict: true })
+  if (!values.session || !values.paths) {
+    console.error('--session and --paths <file|-> are required')
+    return 2
+  }
+  let paths: unknown
+  try {
+    paths = JSON.parse(await readInput(values.paths))
+  } catch {
+    console.error('--paths must hold a JSON array of skill paths')
+    return 2
+  }
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) {
+    console.error('--paths must hold a JSON array of skill paths')
+    return 2
+  }
+  const store = new Store()
+  if (!(await claimInjection(store, values.session))) {
+    console.log('offered 0')
+    return 0
+  }
+  const done = await recordOffers({ store, session: values.session, paths: paths as string[], project: values.project })
+  console.log(`offered ${done.length}`)
+  return 0
+}
+
 async function skillByName(name: string, project?: string) {
   const skills = await discoverSkills({ project })
   return skills.find((s) => s.name === name)
@@ -413,9 +571,14 @@ async function pinCmd(argv: string[], pinned: boolean): Promise<number> {
     console.error(`skill "${name}" not found`)
     return 1
   }
-  const u = await setPinned(skill, pinned)
-  console.log(`${pinned ? 'pinned' : 'unpinned'} ${name} (${u.use_count} uses)`)
-  return 0
+  try {
+    const u = await setPinned(skill, pinned)
+    console.log(`${pinned ? 'pinned' : 'unpinned'} ${name} (${u.use_count} uses)`)
+    return 0
+  } catch (e) {
+    console.error(`cannot ${pinned ? 'pin' : 'unpin'} "${name}": ${e instanceof Error ? e.message : String(e)}; fix or remove its .usage.json first`)
+    return 1
+  }
 }
 
 async function touchCmd(argv: string[]): Promise<number> {
@@ -427,7 +590,11 @@ async function touchCmd(argv: string[]): Promise<number> {
   }
   const skill = await skillByName(name, values.project)
   if (!skill || skill.createdBy !== 'skillmine') return 0
-  await recordUse(skill)
+  try {
+    await recordTouch(skill)
+  } catch (e) {
+    console.error(`skipped use of "${name}": ${e instanceof Error ? e.message : String(e)}`)
+  }
   return 0
 }
 
