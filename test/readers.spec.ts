@@ -232,6 +232,48 @@ describe('opencode reader', () => {
     expect(turns[1]!.tools[0]).toEqual({ name: 'bash', arg: 'docker compose up', failed: true })
     expect(turns[1]!.project).toBe('/home/u/oc')
   })
+
+  test('reads the session_v2 and session_message schema', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'skillmine-oc2-'))
+    const dbPath = join(tmp, 'opencode.db')
+    try {
+      const db = new Database(dbPath)
+      db.run('create table session_v2 (id text primary key, parent_id text, directory text, time_created integer, time_updated integer)')
+      db.run('create table session_message (id text primary key, session_id text, type text, seq integer, time_created integer, data text)')
+      db.run("insert into session_v2 values ('v1', null, '/home/u/oc2', ?, ?)", [NOW - 1000, NOW - 500])
+      db.run("insert into session_v2 values ('v2', 'v1', '/home/u/oc2', ?, ?)", [NOW - 1000, NOW - 500])
+      db.run("insert into session_message values ('sm1', 'v1', 'user', 1, ?, ?)", [
+        NOW - 900,
+        JSON.stringify({ time: { created: NOW - 900 }, text: 'The deploy keeps failing' }),
+      ])
+      db.run("insert into session_message values ('sm2', 'v1', 'assistant', 2, ?, ?)", [
+        NOW - 800,
+        JSON.stringify({
+          time: { created: NOW - 800 },
+          content: [
+            { type: 'reasoning', text: 'think' },
+            { type: 'tool', name: 'shell', state: { status: 'error', input: { command: 'docker compose up' } } },
+            { type: 'text', text: 'Port 3000 is already in use.' },
+          ],
+        }),
+      ])
+      db.run("insert into session_message values ('sm3', 'v1', 'model-switched', 3, ?, '{}')", [NOW - 700])
+      db.close()
+
+      const r = createReaders({ ...paths, opencode: dbPath }).opencode
+      const refs = await r.discover({ since: NOW - 86_400_000 })
+      expect(refs.map((x) => x.id)).toEqual(['v1'])
+      expect(refs[0]!.project).toBe('/home/u/oc2')
+      const turns = await r.read(refs[0]!)
+      expect(turns.map((t) => t.role)).toEqual(['user', 'assistant'])
+      expect(turns[0]!.text).toBe('The deploy keeps failing')
+      expect(turns[1]!.text).toBe('Port 3000 is already in use.')
+      expect(turns[1]!.tools[0]).toEqual({ name: 'shell', arg: 'docker compose up', failed: true })
+      expect(turns[1]!.project).toBe('/home/u/oc2')
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('antigravity reader', () => {

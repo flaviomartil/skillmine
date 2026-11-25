@@ -23,7 +23,9 @@ export function preset(backend: Exclude<PlannerBackend, 'none'>, model?: string)
     case 'codex':
       return { argv: ['codex', 'exec', '--skip-git-repo-check', ...(model ? ['-m', model] : []), PROMPT], stdin: false }
     case 'agy':
-      return { argv: ['agy', '-p', PROMPT, '--output-format', 'json', ...(model ? ['--model', model] : [])], stdin: false }
+      // Plain text: `--output-format json` wraps the answer in {"response": "..."}, which
+      // parsePlanOutput cannot unwrap, so every plan came back as "no JSON object".
+      return { argv: ['agy', '-p', PROMPT, ...(model ? ['--model', model] : [])], stdin: false }
     case 'kimi':
       return { argv: ['kimi', '-p', PROMPT, '--output-format', 'text'], stdin: false }
     case 'opencode':
