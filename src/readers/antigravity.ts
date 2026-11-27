@@ -227,13 +227,14 @@ export class AntigravityReader implements Reader {
     try {
       const rows = db
         .query<{ idx: number; step_type: number; step_payload: Uint8Array | null }, []>(
-          'select idx, step_type, step_payload from steps order by idx',
+          `select idx, step_type, step_payload from steps where step_type in (${STEP_USER}, ${STEP_ASSISTANT}, ${STEP_EVENT}) and step_payload is not null order by idx`,
         )
         .all()
       let lastAssistant: Turn | undefined
       for (const r of rows) {
         if (!r.step_payload) continue
-        const strings = protoStrings(new Uint8Array(r.step_payload))
+        const payload = r.step_payload instanceof Uint8Array ? r.step_payload : new Uint8Array(r.step_payload)
+        const strings = protoStrings(payload)
         if (r.step_type === STEP_USER) {
           const text = (longestAt(strings, USER_TEXT) ?? longest(strings) ?? '').trim()
           if (!text) continue

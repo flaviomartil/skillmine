@@ -69,26 +69,29 @@ export function sliceSession(turns: Turn[]): Window[] {
   const main = turns.filter((t) => !t.sidechain).sort((a, b) => a.ts - b.ts)
   const windows: Window[] = []
   let buf: Turn[] = []
+  let digests: string[] = []
   let size = 0
   const flush = () => {
     if (buf.length >= MIN_TURNS) {
-      const w = toWindow(buf)
+      const w = toWindow(buf, digests)
       if (w) windows.push(w)
     }
     buf = []
+    digests = []
     size = 0
   }
   for (const t of main) {
     const d = digestTurn(t)
     if (size + d.length > MAX_DIGEST_CHARS && buf.length) flush()
     buf.push(t)
+    digests.push(d)
     size += d.length + 1
   }
   flush()
   return windows
 }
 
-function toWindow(turns: Turn[]): Window | undefined {
+function toWindow(turns: Turn[], precomputedDigests?: string[]): Window | undefined {
   if (turns.some((t) => t.role === 'user' && SELF.test(t.text))) return undefined
   if (isExecutionOnly(turns)) return undefined
   const signals = signalsOf(turns)
@@ -101,7 +104,7 @@ function toWindow(turns: Turn[]): Window | undefined {
     session: first.session,
     project: first.project,
     turns,
-    digest: turns.map(digestTurn).join('\n'),
+    digest: (precomputedDigests ?? turns.map(digestTurn)).join('\n'),
     signals,
     start: first.ts,
     end: last.ts,
